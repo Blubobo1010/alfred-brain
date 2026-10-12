@@ -1,0 +1,3 @@
+{"ok": true, "result": "2 files", "structuredContent": {"files": [
+  {"id": "f1", "name": "Riunione Kimera budget", "start_time": 1791792000000, "duration": 1800},
+  {"id": "f2", "name": "Telefonata Bianchi", "start_time": "2026-10-11T09:30:00Z"}]}}

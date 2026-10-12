@@ -1,0 +1,7 @@
+# Dev-only lint config. There is deliberately no pyproject.toml: Hermes would read it as a
+# dependency declaration and prompt for package installs during `hermes plugins install`.
+line-length = 160
+target-version = "py312"
+
+[lint]
+select = ["E", "F", "I", "B", "UP"]

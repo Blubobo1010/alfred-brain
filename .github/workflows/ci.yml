@@ -1,0 +1,52 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Lint
+        run: uvx ruff check .
+      - name: Unit tests (fake vault, LLM and MCP, no network)
+        run: uv run --no-project --with pytest pytest -q tests
+
+  hermes-contract:
+    # Loads the plugin with the real Hermes runtime contracts (network blocked) and runs the
+    # same manifest + security scan the plugin catalog applies. Any "caution" or worse fails.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      HERMES_HOME: ${{ github.workspace }}/.hermes-home
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: plugin
+      - uses: actions/checkout@v4
+        with:
+          repository: Blubobo1010/Alfred-Ai-Audit
+          path: alfred
+      - uses: astral-sh/setup-uv@v5
+      - name: Alfred runtime environment
+        working-directory: alfred
+        run: uv sync --frozen --no-dev
+      - name: plugins doctor
+        working-directory: alfred
+        run: .venv/bin/python -m hermes_cli.main plugins doctor "$GITHUB_WORKSPACE/plugin" --ci
+      - name: plugins validate (must be a clean scan)
+        working-directory: alfred
+        run: |
+          set -o pipefail
+          .venv/bin/python -m hermes_cli.main plugins validate "$GITHUB_WORKSPACE/plugin" | tee validate.log
+          if grep -qiE 'caution|dangerous' validate.log; then
+            echo "::error::security scan is not clean"; exit 1
+          fi
