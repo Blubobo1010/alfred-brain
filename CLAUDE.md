@@ -17,7 +17,7 @@ pacchetto plugin (`plugin.yaml` + `__init__.py`), stdlib only, niente `pyproject
 - Alfred scrive nelle note entità SOLO tra `<!-- alfred:inizio -->` e `<!-- alfred:fine -->` (`vault.add_facts`);
   il resto è degli umani. Ogni fatto porta il link alla fonte.
 - Contesti non `primary` (cron, subagent, flush) non scrivono il diario (`provider.writes`).
-- Diario senza modello; consolidamento per offset in `.alfred/state.json` (`journal_offsets`, `plaud_pending`):
+- Diario senza modello; consolidamento per offset in `.alfred/state.json` (`journal_offsets`, `plaud_pending`, `inbox_pending`):
   un blocco fallito resta in coda. Un solo consolidamento alla volta (`consolidate._run_lock`).
 - `on_session_end` consolida in un thread: CLI/one-shot che escono subito lo perdono, lo recupera il cron delle 03:00.
 - La CLI Hermes carica `cli.py` solo per il provider attivo e senza `register()`: lì il task ausiliario
@@ -25,4 +25,7 @@ pacchetto plugin (`plugin.yaml` + `__init__.py`), stdlib only, niente `pyproject
 - Plaud: forme dei risultati MCP non documentate ufficialmente → parsing tollerante in `plaud.py`; nomi
   dei parametri letti dallo schema del tool (`HermesHost.mcp_params`), fallback `file_id`/`fileId`.
   `call_mcp` tronca a 64 KB: per le trascrizioni lunghe `HermesHost.mcp` rifà la chiamata senza tetto.
+- Cartella aggiornamenti (`inbox.py`, env `ALFRED_BRAIN_INBOX`, cron con deliver telegram): una versione di file =
+  un hash di contenuto; file freschi (< 2 min), nascosti e `~$` saltati. I punti "da vedere" del report sono
+  per parola chiave (`FLAG_RE`), non dal modello: con un modello debole non devono sparire. La cartella non si scrive mai.
 - La casella Gmail personale del CEO non va MAI scritta nel vault (decisione utente 2026-10-12).

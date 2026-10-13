@@ -1,4 +1,4 @@
-"""``alfred brain …``: init, setup, status, sync, consolidate, reindex.
+"""``alfred brain …``: init, setup, inbox, status, sync, consolidate, reindex.
 
 Hermes only wires this file for the ACTIVE memory provider, so the order on a new machine is:
 ``alfred plugins install Blubobo1010/alfred-brain --enable`` (sets ``memory.provider: brain``),
@@ -17,6 +17,9 @@ from .vault import Vault, vault_path
 SYNC_JOB = "brain: Plaud ogni 30 minuti"
 NIGHT_JOB = "brain: consolidamento notturno"
 SYNC_PROMPT = "Chiama il tool brain_sync una volta e rispondi solo con il suo risultato in una riga."
+INBOX_JOB = "brain: aggiornamenti dalla cartella"
+INBOX_PROMPT = ("Chiama il tool brain_inbox una volta. Se il campo report è vuoto o c'è un errore rispondi solo [SILENT]. "
+                "Altrimenti rispondi con il testo del campo report così com'è, senza aggiungere altro.")
 NIGHT_PROMPT = "Chiama il tool brain_consolidate una volta e rispondi solo con il suo risultato in una riga."
 
 
@@ -25,6 +28,10 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     init = sub.add_parser("init", help="Create the Obsidian vault and point Alfred at it")
     init.add_argument("--path", default="", help=f"Vault folder (default {vault_path()})")
     sub.add_parser("setup", help="Schedule Plaud import (every 30 min) and nightly consolidation; check Plaud access")
+    inbox = sub.add_parser("inbox", help="Import colleagues' written updates from the shared folder now; "
+                           "with --path, configure the folder and schedule it every 30 min with a report to the CEO")
+    inbox.add_argument("--path", default="", help="Synced folder (e.g. a SharePoint folder in ~/Library/CloudStorage)")
+    inbox.add_argument("--deliver", default="telegram", help="Where the report goes (cron deliver target, default telegram)")
     sub.add_parser("status", help="Vault counts, last Plaud sync and consolidation")
     sub.add_parser("sync", help="Import new Plaud recordings now")
     sub.add_parser("consolidate", help="File pending journal and recordings into entity notes now")
@@ -34,7 +41,7 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
 def brain_command(args: argparse.Namespace) -> int:
     command = getattr(args, "brain_command", None) or "status"
     try:
-        return {"init": _init, "setup": _setup, "status": _status, "sync": _sync,
+        return {"init": _init, "setup": _setup, "inbox": _inbox, "status": _status, "sync": _sync,
                 "consolidate": _consolidate, "reindex": _reindex}[command](args)
     except KeyboardInterrupt:
         return 130
@@ -74,6 +81,31 @@ def _setup(args: argparse.Namespace) -> int:
     return 0
 
 
+def _inbox(args: argparse.Namespace) -> int:
+    if not getattr(args, "path", ""):
+        from .provider import BrainProvider
+        print(BrainProvider().handle_tool_call("brain_inbox", {}))
+        return 0
+    folder = Path(args.path).expanduser().resolve()
+    if not folder.is_dir():
+        print(f"error: {folder} is not a folder (is it synced on this Mac?)", file=sys.stderr)
+        return 1
+    from cron.jobs import create_job, list_jobs
+
+    from .inbox import ENV
+    _save_env(ENV, str(folder))
+    print(f"{ENV} = {folder}")
+    if INBOX_JOB in {j.get("name") for j in list_jobs(include_disabled=True)}:
+        print(f"cron job already present: {INBOX_JOB}")
+    else:
+        create_job(INBOX_PROMPT, "every 30m", name=INBOX_JOB, deliver=args.deliver, enabled_toolsets=["memory"])
+        print(f"cron job created: {INBOX_JOB} (every 30m, report to {args.deliver})")
+    if args.deliver == "telegram":
+        print("The report goes to the Telegram home channel: the CEO sends /set-home to the bot once.")
+    print("Restart the gateway so the schedule runs: `alfred gateway restart`.")
+    return 0
+
+
 def _status(args: argparse.Namespace) -> int:
     vault = Vault()
     if not vault.exists():
@@ -81,13 +113,16 @@ def _status(args: argparse.Namespace) -> int:
         return 1
     state = vault.state()
     counts = {folder: len(list((vault.root / folder).glob("*.md")))
-              for folder in ("Diario", "Plaud", "Clienti", "Persone", "Progetti")}
+              for folder in ("Diario", "Plaud", "Aggiornamenti", "Clienti", "Persone", "Progetti")}
     from . import journal
+    from .inbox import inbox_path
     print(json.dumps({
         "vault": str(vault.root), "notes": counts,
         "plaud_configured": "plaud" in _mcp_servers(),
         "plaud_allowed": "plaud" in (_plugin_entry().get("mcp_allowlist") or []),
         "plaud_last_sync": state.get("plaud_last_sync"), "plaud_pending": len(state.get("plaud_pending", [])),
+        "inbox_folder": str(inbox_path() or ""), "inbox_last_sync": state.get("inbox_last_sync"),
+        "inbox_pending": len(state.get("inbox_pending", [])),
         "journal_pending_chunks": len(journal.pending_chunks(vault)),
         "last_consolidation": state.get("last_consolidation"),
     }, ensure_ascii=False, indent=2))

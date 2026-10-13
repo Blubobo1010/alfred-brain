@@ -1,6 +1,6 @@
 name: brain
-version: 0.1.0
-description: "Alfred's second brain: an Obsidian vault that Alfred keeps up to date — a daily journal of every conversation, notes on clients, people and projects with their sources, and Plaud recordings imported automatically."
+version: 0.2.0
+description: "Alfred's second brain: an Obsidian vault that Alfred keeps up to date — a daily journal of every conversation, notes on clients, people and projects with their sources, Plaud recordings and colleagues' written updates imported automatically."
 author: Blubobo1010
 license: MIT
 homepage: https://github.com/Blubobo1010/alfred-brain

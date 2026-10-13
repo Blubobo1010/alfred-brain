@@ -29,7 +29,7 @@ class Doc:
     rel: str
     title: str
     names: list[str]  # normalised title + aliases
-    kind: str  # cliente | persona | progetto | diario | plaud | nota
+    kind: str  # cliente | persona | progetto | diario | plaud | aggiornamento | nota
     terms: Counter
     length: int
     mtime: float
@@ -62,7 +62,7 @@ class Index:
         note = parse_note(path)
         top = rel.split("/", 1)[0]
         kind = next((t for t, folder in ENTITY_DIRS.items() if folder == top), None)
-        kind = kind or {"Diario": "diario", "Plaud": "plaud"}.get(top, "nota")
+        kind = kind or {"Diario": "diario", "Plaud": "plaud", "Aggiornamenti": "aggiornamento"}.get(top, "nota")
         names = [normalize(n) for n in [note.title, *(note.meta.get("alias") or [])] if normalize(n)]
         terms = Counter(tokens(note.title + " " + " ".join(note.meta.get("alias") or []) + " " + note.body))
         return Doc(rel, note.title, names, kind, terms, sum(terms.values()) or 1, mtime)

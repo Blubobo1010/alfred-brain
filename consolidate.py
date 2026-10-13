@@ -46,7 +46,10 @@ Regole:
 - Ignora saluti, chiacchiere, domande senza risposta e tutto ciò che riguarda Alfred stesso.
 - Un fatto = una frase breve in italiano, autosufficiente (nomina il soggetto), senza opinioni tue.
 - Date assolute (AAAA-MM-GG) quando il testo le dà o si ricavano da "oggi"; altrimenti lascia vuoto.
-- tipo: "cliente" per aziende e organizzazioni, "persona" per individui, "progetto" per iniziative.
+- tipo: "cliente" per aziende e organizzazioni (anche fornitori, assicurazioni, enti), "persona" solo per
+  individui con un nome proprio, "progetto" per iniziative e prodotti.
+- Per i progetti usa il nome breve del progetto o prodotto, senza reparto o fase ("Z20", non
+  "Z20 Produzione" né "Z20 Progettazione").
 - Usa il nome più completo che compare; varianti e abbreviazioni vanno in alias.
 - Non inventare nulla. Se non c'è niente da salvare restituisci {"entita": []}.
 """
@@ -95,7 +98,7 @@ def source_link(vault: Vault, path: Path) -> str:
 
 
 def run(host: Host, vault: Vault, today: date | None = None) -> dict:
-    """Consolidate every pending journal chunk and Plaud note. A chunk whose extraction fails stays
+    """Consolidate every pending journal chunk, Plaud note and folder update. A chunk whose extraction fails stays
     pending (retried next run); the rest go on."""
     if not _run_lock.acquire(blocking=False):
         return {"chunks": 0, "facts": 0, "failed": 0, "busy": True}
@@ -123,22 +126,8 @@ def _run(host: Host, vault: Vault, today: date) -> dict:
             break  # offsets are sequential per file: stop here, retry from this chunk next time
         journal.mark_done(vault, path, offset)
         report["chunks"] += 1
-    with _lock:
-        pending = list(vault.state().get("plaud_pending", []))
-    for rel in pending:
-        path = vault.root / rel
-        try:
-            text = plaud_source_text(path.read_text(encoding="utf-8"))
-            report["facts"] += consolidate_text(host, vault, text, source_link(vault, path), today)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("brain: consolidation of %s failed: %s", rel, exc)
-            report["failed"] += 1
-            continue
-        with _lock:
-            state = vault.state()
-            state["plaud_pending"] = [p for p in state.get("plaud_pending", []) if p != rel]
-            vault.save_state(state)
-        report["chunks"] += 1
+    for key, to_text in (("plaud_pending", plaud_source_text), ("inbox_pending", lambda t: t[:MAX_SOURCE_CHARS])):
+        _run_pending(host, vault, today, key, to_text, report)
     if report["chunks"]:
         vault.write_index()
         with _lock:
@@ -147,3 +136,23 @@ def _run(host: Host, vault: Vault, today: date) -> dict:
             vault.save_state(state)
         vault.commit(f"Consolidamento: {report['facts']} fatti da {report['chunks']} blocchi")
     return report
+
+
+def _run_pending(host: Host, vault: Vault, today: date, key: str, to_text, report: dict) -> None:
+    """Whole-note sources (Plaud recordings, folder updates) queued under ``key`` in the vault state."""
+    with _lock:
+        pending = list(vault.state().get(key, []))
+    for rel in pending:
+        path = vault.root / rel
+        try:
+            text = to_text(path.read_text(encoding="utf-8"))
+            report["facts"] += consolidate_text(host, vault, text, source_link(vault, path), today)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("brain: consolidation of %s failed: %s", rel, exc)
+            report["failed"] += 1
+            continue
+        with _lock:
+            state = vault.state()
+            state[key] = [p for p in state.get(key, []) if p != rel]
+            vault.save_state(state)
+        report["chunks"] += 1

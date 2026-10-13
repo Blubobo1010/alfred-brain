@@ -22,6 +22,7 @@ from typing import Any
 DEFAULT_PATH = "~/Alfred-Vault"
 JOURNAL_DIR = "Diario"
 PLAUD_DIR = "Plaud"
+UPDATES_DIR = "Aggiornamenti"
 ENTITY_DIRS = {"cliente": "Clienti", "persona": "Persone", "progetto": "Progetti"}
 INDEX_NOTE = "Indice.md"
 STATE_DIR = ".alfred"
@@ -35,6 +36,7 @@ Questo vault lo tiene aggiornato Alfred.
 
 - **Diario/**: una nota al giorno con ogni conversazione, scritta così com'è.
 - **Plaud/**: una nota per registrazione, con riassunto, azioni e trascrizione.
+- **Aggiornamenti/**: gli aggiornamenti scritti dai collaboratori (cartella condivisa), così come arrivano.
 - **Clienti/**, **Persone/**, **Progetti/**: cosa Alfred ha imparato, con la fonte di ogni informazione.
 
 Nelle note di Clienti, Persone e Progetti, Alfred scrive solo nel riquadro tra
@@ -122,7 +124,7 @@ class Vault:
         """Create the layout (idempotent). Returns True when the vault was new."""
         with _lock:
             new = not self.exists()
-            for sub in (JOURNAL_DIR, PLAUD_DIR, *ENTITY_DIRS.values(), STATE_DIR):
+            for sub in (JOURNAL_DIR, PLAUD_DIR, UPDATES_DIR, *ENTITY_DIRS.values(), STATE_DIR):
                 (self.root / sub).mkdir(parents=True, exist_ok=True)
             if not (self.root / "LEGGIMI.md").exists():
                 atomic_write(self.root / "LEGGIMI.md", README)

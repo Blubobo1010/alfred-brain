@@ -1,5 +1,5 @@
 """The memory provider: journal every turn, recall from the vault before each turn, consolidate at
-session end, and five small tools (search, read, note, Plaud sync, consolidate)."""
+session end, and six small tools (search, read, note, Plaud sync, folder updates, consolidate)."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from typing import Any
 
 from . import consolidate, journal
 from .host import HermesHost, Host
+from .inbox import Inbox
 from .index import Index, recall_block
 from .plaud import Plaud, PlaudError
 from .vault import ENTITY_DIRS, Vault
@@ -56,6 +57,10 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                                                      "fatto": _PROP}, "required": ["tipo", "nome", "fatto"]}},
     {"name": "brain_sync",
      "description": "Import new Plaud recordings into the vault (runs on a schedule; call it when asked for the latest recordings).",
+     "parameters": {"type": "object", "properties": {}}},
+    {"name": "brain_inbox",
+     "description": "Import new written updates from colleagues (shared folder: production, design, other topics) into "
+                    "the vault and return a short report for the CEO in the field 'report' (empty when nothing is new).",
      "parameters": {"type": "object", "properties": {}}},
     {"name": "brain_consolidate",
      "description": "File what was said in recent conversations and recordings into the client, person and project notes.",
@@ -107,7 +112,8 @@ class BrainProvider(MemoryProvider):
 
     def system_prompt_block(self) -> str:
         return ("# Secondo cervello\nHai un vault Obsidian con diario delle conversazioni, note su clienti, persone e "
-                "progetti e registrazioni Plaud. Prima di rispondere su persone, aziende, incontri o conversazioni "
+                "progetti, registrazioni Plaud e aggiornamenti scritti dai collaboratori (Aggiornamenti/). "
+                "Prima di rispondere su persone, aziende, incontri, stato di produzione o conversazioni "
                 "passate usa brain_search; cita le note come [[percorso]]. Salva con brain_note ciò che l'utente "
                 "chiede di ricordare.")
 
@@ -194,6 +200,12 @@ class BrainProvider(MemoryProvider):
 
     def _tool_sync(self, args: dict[str, Any]) -> dict[str, Any]:
         report = Plaud(self.host, self.vault).sync()
+        if report["new"]:
+            report["consolidation"] = consolidate.run(self.host, self.vault)
+        return {"ok": True, **report}
+
+    def _tool_inbox(self, args: dict[str, Any]) -> dict[str, Any]:
+        report = Inbox(self.host, self.vault).sync()
         if report["new"]:
             report["consolidation"] = consolidate.run(self.host, self.vault)
         return {"ok": True, **report}
