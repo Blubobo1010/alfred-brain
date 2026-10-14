@@ -84,6 +84,12 @@ def test_model_failure_still_files_the_memo(vault, tmp_path):
     assert "_Riassunto non disponibile._" in note.body and "(riassunto non disponibile)" in out["report"]
 
 
+def test_an_unusable_model_answer_is_logged(vault, tmp_path, caplog):
+    path = memo(tmp_path, "e.m4a")
+    out = VoiceMemos(FakeHost(llm=lambda _text: None, transcripts={"e.m4a": SPOKEN}), vault).run(path, fonte="telegram")
+    assert out["categoria"] == "altro" and "classifying a voice memo failed: the model gave no usable JSON" in caplog.text
+
+
 def test_categories_outside_the_lists_become_altro(vault, tmp_path):
     path = memo(tmp_path, "c.m4a")
     host = FakeHost(llm=[{**INFO, "categoria": "urgente", "area": "marketing"}], transcripts={"c.m4a": SPOKEN})

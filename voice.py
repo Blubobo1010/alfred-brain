@@ -340,6 +340,8 @@ class VoiceMemos:
         prompt = (KNOWN_HINT + "; ".join(known) + "\n\n" if known else "") + transcript[:MAX_CHARS]
         try:
             parsed = self.host.llm_json(INSTRUCTIONS, prompt, SCHEMA) or {}
+            if not parsed:
+                logger.warning("brain: classifying a voice memo failed: the model gave no usable JSON")
         except Exception as exc:  # noqa: BLE001
             logger.warning("brain: classifying a voice memo failed: %s", exc)
             parsed = {}

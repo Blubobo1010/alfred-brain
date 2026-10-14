@@ -7,7 +7,7 @@ from pathlib import Path
 from .host import AUX_TASK
 from .provider import BrainProvider
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 
 def register(ctx) -> None:

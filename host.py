@@ -73,11 +73,7 @@ class HermesHost(Host):
             result = llm.complete_structured(**kwargs)
         if isinstance(result.parsed, dict):
             return result.parsed
-        try:
-            parsed = json.loads(_strip_fence(result.text))
-        except (TypeError, ValueError):
-            return None
-        return parsed if isinstance(parsed, dict) else None
+        return json_object(result.text)
 
     def mcp(self, server: str, tool: str, args: dict[str, Any], timeout: float = 60) -> dict[str, Any]:
         _connect(server)
@@ -169,8 +165,22 @@ def _envelope(raw: Any) -> dict[str, Any]:
     return {"ok": True, "result": parsed if parsed is not None else raw}
 
 
+def json_object(text: str | None) -> dict[str, Any] | None:
+    """The JSON object in a model's answer: bare, in a code fence, or after a local model's reasoning
+    (``<think>…</think>{…}``) or a sentence of prose. None when there is none."""
+    text = _strip_fence((text or "").rsplit("</think>", 1)[-1])
+    for candidate in (text, text[text.find("{"):text.rfind("}") + 1]):
+        try:
+            parsed = json.loads(candidate)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
 def _strip_fence(text: str) -> str:
-    text = (text or "").strip()
+    text = text.strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[-1].rsplit("```", 1)[0]
     return text
