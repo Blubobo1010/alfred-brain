@@ -1,5 +1,5 @@
 """The memory provider: journal every turn, recall from the vault before each turn, consolidate at
-session end, and six small tools (search, read, note, Plaud sync, folder updates, consolidate)."""
+session end, and seven small tools (search, read, note, Plaud sync, folder updates, voice memos, consolidate)."""
 
 from __future__ import annotations
 
@@ -10,10 +10,11 @@ from typing import Any
 
 from . import consolidate, journal
 from .host import HermesHost, Host
-from .inbox import Inbox
+from .inbox import Inbox, voice_path
 from .index import Index, recall_block
 from .plaud import Plaud, PlaudError
 from .vault import ENTITY_DIRS, Vault
+from .voice import VoiceMemos
 
 try:
     from agent.memory_provider import MemoryProvider, RecallStatus, is_trivial_prompt, spawn_context_thread
@@ -59,9 +60,16 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
      "description": "Import new Plaud recordings into the vault (runs on a schedule; call it when asked for the latest recordings).",
      "parameters": {"type": "object", "properties": {}}},
     {"name": "brain_inbox",
-     "description": "Import new written updates from colleagues (shared folder: production, design, other topics) into "
-                    "the vault and return a short report for the CEO in the field 'report' (empty when nothing is new).",
+     "description": "Import new written updates from colleagues (shared folder: production, design, other topics) and "
+                    "the CEO's voice memos from his own folder into the vault and return a short report for the CEO in "
+                    "the field 'report' (empty when nothing is new; recordings are reported once transcribed).",
      "parameters": {"type": "object", "properties": {}}},
+    {"name": "brain_transcribe",
+     "description": "Transcribe an audio file the user sent (an iPhone voice memo or any audio attachment: pass the local "
+                    "path given in the attachment note), file it in the vault as a categorised voice note (Note vocali/) "
+                    "and return the summary for the user in the field 'report'. Status 'in_progress' means a long "
+                    "recording is still being transcribed: call again later with the same path.",
+     "parameters": {"type": "object", "properties": {"path": _PROP}, "required": ["path"]}},
     {"name": "brain_consolidate",
      "description": "File what was said in recent conversations and recordings into the client, person and project notes.",
      "parameters": {"type": "object", "properties": {}}},
@@ -76,6 +84,8 @@ class BrainProvider(MemoryProvider):
         self._context = "primary"
         self._platform = ""
         self._last_recall = 0
+        self._author = ""  # who wrote the current turn (a voice memo's author)
+        self._turn_notes: list[str] = []  # voice notes filed during the current turn
 
     # ---- identity -------------------------------------------------------------------------
 
@@ -112,10 +122,14 @@ class BrainProvider(MemoryProvider):
 
     def system_prompt_block(self) -> str:
         return ("# Secondo cervello\nHai un vault Obsidian con diario delle conversazioni, note su clienti, persone e "
-                "progetti, registrazioni Plaud e aggiornamenti scritti dai collaboratori (Aggiornamenti/). "
-                "Prima di rispondere su persone, aziende, incontri, stato di produzione o conversazioni "
-                "passate usa brain_search; cita le note come [[percorso]]. Salva con brain_note ciò che l'utente "
-                "chiede di ricordare.")
+                "progetti, registrazioni Plaud, aggiornamenti scritti dai collaboratori (Aggiornamenti/) e note "
+                "vocali (Note vocali/). Prima di rispondere su persone, aziende, incontri, stato di produzione o "
+                "conversazioni passate usa brain_search; cita le note come [[percorso]]. Salva con brain_note ciò che "
+                "l'utente chiede di ricordare. Quando l'utente invia un file audio (una nota vocale), chiama "
+                "brain_transcribe con il suo percorso e riferisci il campo report."
+                + (" Se un audio viene scartato perché troppo grande per la chat, non chiedere un file più piccolo: "
+                   "digli di salvarlo nella sua cartella di Alfred su OneDrive (Condividi → Salva in File), il "
+                   "riassunto arriva entro mezz'ora." if voice_path() else ""))
 
     # ---- per turn -------------------------------------------------------------------------
 
@@ -134,10 +148,17 @@ class BrainProvider(MemoryProvider):
     def recall_status(self) -> RecallStatus | None:
         return RecallStatus("Secondo cervello", self._last_recall) if self._last_recall else None
 
+    def on_turn_start(self, turn_number: int, message: str, **kwargs: Any) -> None:
+        self._author = str(kwargs.get("author_name") or "")
+        self._turn_notes = []
+
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "",
                   messages: list[dict[str, Any]] | None = None, turn_author: dict[str, Any] | None = None) -> None:
+        notes, self._turn_notes = self._turn_notes, []
         if not self.writes or is_trivial_prompt(user_content) or _is_compaction(user_content):
             return
+        if notes:  # the memo's facts are filed from its note: the journal keeps the link, not the summary again
+            assistant_content = "\n".join(f"Nota vocale archiviata: [[{rel[:-3]}]]" for rel in notes)
         author = str((turn_author or {}).get("name") or "")
         journal.append_turn(self.vault, user_content, assistant_content, author=author, platform=self._platform)
 
@@ -209,6 +230,13 @@ class BrainProvider(MemoryProvider):
         if report["new"]:
             report["consolidation"] = consolidate.run(self.host, self.vault)
         return {"ok": True, **report}
+
+    def _tool_transcribe(self, args: dict[str, Any]) -> dict[str, Any]:
+        result = VoiceMemos(self.host, self.vault).run(self.host.local_path(str(args["path"])),
+                                                       fonte=self._platform or "chat", autore=self._author)
+        if result.get("note") and result.get("status") in ("done", "duplicate"):
+            self._turn_notes.append(result["note"])
+        return result
 
     def _tool_consolidate(self, args: dict[str, Any]) -> dict[str, Any]:
         return {"ok": True, **consolidate.run(self.host, self.vault)}

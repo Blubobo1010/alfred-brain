@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -31,14 +32,21 @@ from alfred_brain.vault import Vault  # noqa: E402
 
 
 class FakeHost(Host):
-    """``llm_json`` answers from a queue (or a callable); ``mcp`` answers from a {tool: response} table."""
+    """``llm_json`` answers from a queue (or a callable); ``mcp`` answers from a {tool: response} table;
+    ``transcribe`` from a {file name: text or exception} table (or a callable), held by ``gate`` while it is closed;
+    ``wake_inbox`` counts in ``wakes``."""
 
-    def __init__(self, llm: Any = None, mcp: dict[str, Any] | None = None, params: dict[str, list[str]] | None = None):
+    def __init__(self, llm: Any = None, mcp: dict[str, Any] | None = None, params: dict[str, list[str]] | None = None,
+                 transcripts: Any = None, gate: threading.Event | None = None):
         self.llm = llm
         self.mcp_table = mcp or {}
         self.params = params or {}
+        self.transcripts = transcripts
+        self.gate = gate
         self.llm_calls: list[str] = []
         self.mcp_calls: list[tuple[str, str, dict]] = []
+        self.transcribe_calls: list[str] = []
+        self.wakes = 0
 
     def llm_json(self, instructions, text, schema):
         self.llm_calls.append(text)
@@ -60,9 +68,28 @@ class FakeHost(Host):
     def mcp_params(self, server, tool):
         return self.params.get(tool, [])
 
+    def transcribe(self, path):
+        self.transcribe_calls.append(Path(path).name)
+        if self.gate is not None:
+            self.gate.wait(5)
+        answer = self.transcripts(path) if callable(self.transcripts) else (self.transcripts or {}).get(Path(path).name, "")
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    def wake_inbox(self):
+        self.wakes += 1
+
 
 def fixture(name: str) -> Any:
     return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
+
+
+@pytest.fixture(autouse=True)
+def no_folders_from_the_environment(monkeypatch):
+    """Tests pass their folders explicitly: a real ALFRED_BRAIN_* on the developer's machine must not leak in."""
+    for name in ("ALFRED_BRAIN_INBOX", "ALFRED_BRAIN_VOICE"):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture

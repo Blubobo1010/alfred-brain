@@ -1,9 +1,10 @@
-"""From raw text (journal turns, Plaud notes) to entity notes: the model extracts durable facts about
-clients, people and projects; the merge into the vault is deterministic and keeps the source link."""
+"""From raw text (journal turns, Plaud notes, folder updates, voice memos) to entity notes: the model extracts
+durable facts about clients, people and projects; the merge into the vault is deterministic and keeps the source link."""
 
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from datetime import date
 from pathlib import Path
@@ -98,8 +99,8 @@ def source_link(vault: Vault, path: Path) -> str:
 
 
 def run(host: Host, vault: Vault, today: date | None = None) -> dict:
-    """Consolidate every pending journal chunk, Plaud note and folder update. A chunk whose extraction fails stays
-    pending (retried next run); the rest go on."""
+    """Consolidate every pending journal chunk, Plaud note, folder update and voice memo. A chunk whose extraction
+    fails stays pending (retried next run); the rest go on."""
     if not _run_lock.acquire(blocking=False):
         return {"chunks": 0, "facts": 0, "failed": 0, "busy": True}
     try:
@@ -115,6 +116,18 @@ def plaud_source_text(text: str) -> str:
     return (head if has_summary or not sep else head + sep + transcript)[:MAX_SOURCE_CHARS]
 
 
+def voice_source_text(text: str) -> str:
+    """A voice memo: title, date and transcript when they fit (the facts as spoken), else its summary and actions
+    like a Plaud recording. Never both: the same fact would be filed twice in different words."""
+    head, sep, transcript = text.partition("\n" + TRANSCRIPT_HEADING)
+    title = next((ln for ln in head.splitlines() if ln.startswith("# ")), "")
+    recorded = re.search(r"^data: (\S+)", head, re.M)
+    lead = title + (f"\nRegistrata il {recorded.group(1)}" if recorded else "")
+    if sep and len(lead) + len(transcript) < MAX_SOURCE_CHARS:
+        return lead + "\n\n" + transcript.strip()
+    return head[:MAX_SOURCE_CHARS]
+
+
 def _run(host: Host, vault: Vault, today: date) -> dict:
     report = {"chunks": 0, "facts": 0, "failed": 0}
     for path, offset, text in journal.pending_chunks(vault):
@@ -126,7 +139,8 @@ def _run(host: Host, vault: Vault, today: date) -> dict:
             break  # offsets are sequential per file: stop here, retry from this chunk next time
         journal.mark_done(vault, path, offset)
         report["chunks"] += 1
-    for key, to_text in (("plaud_pending", plaud_source_text), ("inbox_pending", lambda t: t[:MAX_SOURCE_CHARS])):
+    for key, to_text in (("plaud_pending", plaud_source_text), ("inbox_pending", lambda t: t[:MAX_SOURCE_CHARS]),
+                         ("voice_pending", voice_source_text)):
         _run_pending(host, vault, today, key, to_text, report)
     if report["chunks"]:
         vault.write_index()
@@ -139,11 +153,18 @@ def _run(host: Host, vault: Vault, today: date) -> dict:
 
 
 def _run_pending(host: Host, vault: Vault, today: date, key: str, to_text, report: dict) -> None:
-    """Whole-note sources (Plaud recordings, folder updates) queued under ``key`` in the vault state."""
+    """Whole-note sources (Plaud recordings, folder updates, voice memos) queued under ``key`` in the vault state."""
     with _lock:
         pending = list(vault.state().get(key, []))
     for rel in pending:
         path = vault.root / rel
+        if not path.exists():  # deleted by hand (or redone under a new name): nothing left to file
+            logger.info("brain: %s no longer exists, dropped from %s", rel, key)
+            with _lock:
+                state = vault.state()
+                state[key] = [p for p in state.get(key, []) if p != rel]
+                vault.save_state(state)
+            continue
         try:
             text = to_text(path.read_text(encoding="utf-8"))
             report["facts"] += consolidate_text(host, vault, text, source_link(vault, path), today)

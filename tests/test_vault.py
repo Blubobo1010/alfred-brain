@@ -1,13 +1,13 @@
 from datetime import date
 
 import pytest
-from alfred_brain.vault import MANAGED_END, MANAGED_START, Vault, normalize, parse_note
+from alfred_brain.vault import MANAGED_END, MANAGED_START, Vault, meta_value, normalize, parse_note
 
 
 def test_init_is_idempotent_and_versioned(tmp_path):
     v = Vault(tmp_path / "v")
     assert v.init() is True and v.init() is False
-    for d in ("Diario", "Plaud", "Clienti", "Persone", "Progetti", ".alfred"):
+    for d in ("Diario", "Plaud", "Aggiornamenti", "Note vocali", "Clienti", "Persone", "Progetti", ".alfred"):
         assert (v.root / d).is_dir()
     assert (v.root / "Indice.md").exists() and (v.root / "LEGGIMI.md").exists()
 
@@ -59,3 +59,8 @@ def test_bad_tipo_refused(vault):
 
 def test_normalize():
     assert normalize("  Società  ÀBC-srl ") == "societa abc srl"
+
+
+def test_meta_value_keeps_frontmatter_valid():
+    assert meta_value('Beta: "Compositi", [srl] #1\n') == "Beta Compositi srl 1"
+    assert meta_value("- Z20 ?") == "Z20" and meta_value("x" * 99, 10) == "x" * 10

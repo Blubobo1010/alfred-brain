@@ -23,6 +23,14 @@ def test_recall_block_is_capped_and_cites_paths(vault):
     assert "**Persone/Marco Bianchi.md**" in block or "**Clienti/Kimera Automobili.md**" in block
 
 
+def test_voice_notes_are_searchable_by_category(vault):
+    (vault.root / "Note vocali" / "2026-10-14 Pannelli.md").write_text(
+        "---\ntipo: nota vocale\ncategoria: idea\n---\n# Pannelli in carbonio\n\nCategoria: idea · Area: fornitori\n",
+        encoding="utf-8")
+    hits = Index(vault).search("idea sui pannelli")
+    assert hits[0][1].rel == "Note vocali/2026-10-14 Pannelli.md" and hits[0][1].kind == "nota vocale"
+
+
 def test_no_match_no_block(vault):
     seed(vault)
     assert recall_block(Index(vault), "quantistica")[0] == ""

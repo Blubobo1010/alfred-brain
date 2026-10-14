@@ -70,6 +70,36 @@ def test_session_end_consolidates_in_background(vault):
     assert (vault.root / "Clienti" / "Kimera.md").exists()
 
 
+def test_transcribe_tool_reports_and_journals_only_the_link(vault, tmp_path):
+    from alfred_brain.vault import parse_note
+    audio = tmp_path / "audio_1a2b.m4a"
+    audio.write_bytes(b"x")
+    info = {"titolo": "Idea pannelli", "categoria": "idea", "area": "progettazione", "riassunto": ["Pannelli più leggeri."],
+            "azioni": []}
+    p = provider(vault, llm=[info], transcripts={"audio_1a2b.m4a": "Proviamo pannelli più leggeri per la Z20."})
+    assert "brain_transcribe" in {s["name"] for s in p.get_tool_schemas()} and "brain_transcribe" in p.system_prompt_block()
+    p.on_turn_start(1, "nota vocale", author_name="Luca")
+    out = call(p, "brain_transcribe", path=str(audio))
+    assert out["ok"] and out["status"] == "done" and out["report"].startswith("Nota vocale «Idea pannelli» (idea · progettazione)")
+    assert parse_note(vault.root / out["note"]).meta["autore"] == "Luca"
+    p.sync_turn(f"[The user sent an audio file attachment: 'memo'. It is saved at: {audio}.]", out["report"],
+                turn_author={"name": "Luca"})
+    text = (vault.root / "Diario" / f"{date.today().isoformat()}.md").read_text(encoding="utf-8")
+    assert f"**Alfred:** Nota vocale archiviata: [[{out['note'][:-3]}]]" in text and "Pannelli più leggeri." not in text
+    p.on_turn_start(2, "altro")
+    p.sync_turn("E il budget di Kimera?", "Approvato.")
+    assert "**Alfred:** Approvato." in (vault.root / "Diario" / f"{date.today().isoformat()}.md").read_text(encoding="utf-8")
+    assert call(p, "brain_transcribe", path=str(tmp_path / "sparito.m4a"))["ok"] is False
+    assert "not an audio file" in call(p, "brain_transcribe", path=str(tmp_path / "foto.jpg"))["error"]
+
+
+def test_oversized_audio_points_to_the_ceo_s_folder_only_when_there_is_one(vault, tmp_path, monkeypatch):
+    p = provider(vault)
+    assert "OneDrive" not in p.system_prompt_block()
+    monkeypatch.setenv("ALFRED_BRAIN_VOICE", str(tmp_path))
+    assert "troppo grande per la chat" in p.system_prompt_block() and "OneDrive" in p.system_prompt_block()
+
+
 def test_unavailable_without_vault(tmp_path):
     from alfred_brain.vault import Vault
     p = BrainProvider(host=FakeHost(), vault=Vault(tmp_path / "none"))

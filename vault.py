@@ -23,6 +23,7 @@ DEFAULT_PATH = "~/Alfred-Vault"
 JOURNAL_DIR = "Diario"
 PLAUD_DIR = "Plaud"
 UPDATES_DIR = "Aggiornamenti"
+VOICE_DIR = "Note vocali"
 ENTITY_DIRS = {"cliente": "Clienti", "persona": "Persone", "progetto": "Progetti"}
 INDEX_NOTE = "Indice.md"
 STATE_DIR = ".alfred"
@@ -37,6 +38,8 @@ Questo vault lo tiene aggiornato Alfred.
 - **Diario/**: una nota al giorno con ogni conversazione, scritta così com'è.
 - **Plaud/**: una nota per registrazione, con riassunto, azioni e trascrizione.
 - **Aggiornamenti/**: gli aggiornamenti scritti dai collaboratori (cartella condivisa), così come arrivano.
+- **Note vocali/**: una nota per ogni registrazione audio (memo dell'iPhone, audio dei collaboratori), con
+  categoria, riassunto, cose da fare e trascrizione completa. L'audio non viene conservato.
 - **Clienti/**, **Persone/**, **Progetti/**: cosa Alfred ha imparato, con la fonte di ogni informazione.
 
 Nelle note di Clienti, Persone e Progetti, Alfred scrive solo nel riquadro tra
@@ -62,6 +65,12 @@ def normalize(text: str) -> str:
 def safe_filename(name: str, limit: int = 80) -> str:
     cleaned = re.sub(r'[\\/:*?"<>|#^\[\]\n\r\t]+', " ", name or "").strip(" .")
     return re.sub(r"\s+", " ", cleaned)[:limit].strip() or "Senza titolo"
+
+
+def meta_value(value: Any, limit: int = 60) -> str:
+    """A frontmatter-safe scalar or list item (one line, no YAML or list punctuation): model output goes in as text."""
+    cleaned = re.sub(r"[\[\]{}:#,\"'|>&*!%@`]+", " ", str(value or ""))
+    return re.sub(r"\s+", " ", cleaned).strip(" -?")[:limit].strip()
 
 
 @dataclass
@@ -124,7 +133,7 @@ class Vault:
         """Create the layout (idempotent). Returns True when the vault was new."""
         with _lock:
             new = not self.exists()
-            for sub in (JOURNAL_DIR, PLAUD_DIR, UPDATES_DIR, *ENTITY_DIRS.values(), STATE_DIR):
+            for sub in (JOURNAL_DIR, PLAUD_DIR, UPDATES_DIR, VOICE_DIR, *ENTITY_DIRS.values(), STATE_DIR):
                 (self.root / sub).mkdir(parents=True, exist_ok=True)
             if not (self.root / "LEGGIMI.md").exists():
                 atomic_write(self.root / "LEGGIMI.md", README)

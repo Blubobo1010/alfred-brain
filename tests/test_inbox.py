@@ -112,7 +112,24 @@ def test_updates_are_consolidated_into_projects(vault, folder):
 def test_tool_without_folder_is_a_clear_error(vault, monkeypatch):
     monkeypatch.delenv("ALFRED_BRAIN_INBOX", raising=False)
     out = BrainProvider(host=FakeHost(), vault=vault).handle_tool_call("brain_inbox", {})
-    assert '"ok": false' in out and "alfred brain inbox --path" in out
+    assert '"ok": false' in out and "alfred brain inbox --path" in out and "--voice-path" in out
+
+
+def test_tool_with_only_the_ceo_s_voice_folder(vault, tmp_path, monkeypatch):
+    own = tmp_path / "Alfred"
+    own.mkdir()
+    monkeypatch.setenv("ALFRED_BRAIN_VOICE", str(own))
+    out = BrainProvider(host=FakeHost(), vault=vault).handle_tool_call("brain_inbox", {})
+    assert '"ok": true' in out and '"new": 0' in out and '"report": ""' in out
+
+
+def test_a_missing_folder_does_not_stop_the_other(vault, folder, tmp_path):
+    drop(folder, "agg.txt", "Aggiornamento\n- Z20 V05 cellula incollata")
+    gone = tmp_path / "OneDrive non sincronizzato"
+    report = Inbox(FakeHost(llm=[REPORT]), vault, folder, voice_folder=gone).sync(today=TODAY)
+    assert report["new"] == 1 and report["missing"] == [str(gone)] and report["errors"] == []
+    with pytest.raises(ValueError, match="folder not found"):
+        Inbox(FakeHost(), vault, tmp_path / "sparita", voice_folder=gone).sync()
 
 
 def test_tool_reports_and_consolidates(vault, folder, monkeypatch):

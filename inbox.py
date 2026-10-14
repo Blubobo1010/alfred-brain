@@ -3,6 +3,12 @@
 The folder is typically a SharePoint/OneDrive folder synced on the Mac mini where colleagues put a
 weekly status update (plain text, Markdown or Word). Each file version is imported once (content
 hash), kept verbatim in the vault, queued for consolidation, and summarised for the CEO.
+
+Audio files in the folder (a spoken update) become voice memos (``voice.py``): transcribed in the
+background, never waited for here, and reported on the next run together with any chat memo that
+finished after its caller stopped waiting. The CEO's own memo folder (``ALFRED_BRAIN_VOICE``, e.g. a
+OneDrive folder only he sees, for recordings too big for the chat) is scanned the same way, audio only:
+his memos never go through the folder colleagues can open.
 """
 
 from __future__ import annotations
@@ -18,12 +24,14 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
 
+from . import voice
 from .host import Host
 from .vault import UPDATES_DIR, Vault, _lock, atomic_write, safe_filename
 
 logger = logging.getLogger(__name__)
 
 ENV = "ALFRED_BRAIN_INBOX"
+VOICE_ENV = "ALFRED_BRAIN_VOICE"
 SUFFIXES = (".txt", ".md", ".docx")
 SETTLE_SECONDS = 120  # a file still being written or synced is picked up on the next run
 MAX_CHARS = 40000
@@ -55,6 +63,11 @@ def inbox_path() -> Path | None:
     return Path(value).expanduser() if value else None
 
 
+def voice_path() -> Path | None:
+    value = os.environ.get(VOICE_ENV, "").strip()
+    return Path(value).expanduser() if value else None
+
+
 def read_text(path: Path) -> str:
     if path.suffix.lower() == ".docx":
         return _docx_text(path)
@@ -79,12 +92,12 @@ def _docx_text(path: Path) -> str:
     return "\n".join(lines)
 
 
-def candidates(folder: Path, now: float | None = None) -> list[Path]:
+def candidates(folder: Path, now: float | None = None, suffixes: tuple[str, ...] = SUFFIXES) -> list[Path]:
     now = now or time.time()
     out = []
     for path in sorted(folder.rglob("*")):
         rel = path.relative_to(folder).parts
-        if any(p.startswith((".", "~$")) for p in rel) or path.suffix.lower() not in SUFFIXES or not path.is_file():
+        if any(p.startswith((".", "~$")) for p in rel) or path.suffix.lower() not in suffixes or not path.is_file():
             continue
         try:
             if now - path.stat().st_mtime < SETTLE_SECONDS:
@@ -129,20 +142,49 @@ def title_of(text: str, path: Path) -> str:
 
 
 class Inbox:
-    def __init__(self, host: Host, vault: Vault, folder: Path | None = None):
+    def __init__(self, host: Host, vault: Vault, folder: Path | None = None, voice_folder: Path | None = None):
         self.host, self.vault = host, vault
         self.folder = folder or inbox_path()
+        self.voice_folder = voice_folder or voice_path()
 
     def sync(self, today: date | None = None, now: float | None = None) -> dict[str, Any]:
         today = today or date.today()
-        if self.folder is None:
-            raise ValueError(f"no updates folder configured: run `alfred brain inbox --path <folder>` ({ENV})")
-        if not self.folder.is_dir():
-            raise ValueError(f"updates folder not found: {self.folder} (is it synced on this Mac?)")
-        seen = set(self.vault.state().get("inbox_seen", []))
+        folders = [f for f in (self.folder, self.voice_folder) if f is not None]
+        if not folders:
+            raise ValueError(f"no folder configured: run `alfred brain inbox --path <folder>` ({ENV}) "
+                             f"or `--voice-path <folder>` ({VOICE_ENV})")
+        missing = [f for f in folders if not f.is_dir()]
+        if len(missing) == len(folders):
+            raise ValueError(f"folder not found: {missing[0]} (is it synced on this Mac?)")
         report: dict[str, Any] = {"new": 0, "skipped": 0, "errors": [], "notes": [], "report": ""}
+        if missing:  # e.g. one OneDrive folder not synced yet: the other one still runs
+            report["missing"] = [str(f) for f in missing]
+            logger.warning("brain: folder not found: %s", ", ".join(report["missing"]))
+        imported = self._import_texts(today, now, report) if self.folder and self.folder not in missing else []
+        with _lock:
+            state = self.vault.state()
+            state["inbox_last_sync"] = datetime.now().isoformat(timespec="seconds")
+            self.vault.save_state(state)
+        # The CEO's own folder first: if it sits inside the updates folder, its recordings stay his.
+        roots = [(f, fonte) for f, fonte in ((self.voice_folder, voice.PERSONAL), (self.folder, voice.FOLDER))
+                 if f is not None and f not in missing]
+        pending = self._start_audio(now, roots)
+        if imported:
+            report["report"] = "\n\n".join(self._summary(note, text) for note, text in imported)
+            self.vault.commit(f"Aggiornamenti: {report['new']} file")
+        memos = voice.VoiceMemos(self.host, self.vault).pop_reports()  # audio done since the last run, chat memos too
+        if memos:
+            report["report"] = "\n\n".join(r for r in (report["report"], *memos) if r)
+        report["voice"] = {"pending": pending, "running": voice.busy(), "reported": len(memos)}
+        return report
+
+    def _import_texts(self, today: date, now: float | None, report: dict[str, Any]) -> list[tuple[Path, str]]:
+        """Colleagues' written updates: each file version once, kept verbatim, queued for consolidation."""
+        seen = set(self.vault.state().get("inbox_seen", []))
         imported: list[tuple[Path, str]] = []
         for path in candidates(self.folder, now):
+            if self.voice_folder and path.is_relative_to(self.voice_folder):
+                continue  # the CEO's own folder inside this one: audio only, never a colleague's update
             try:
                 text = read_text(path)
             except (OSError, zipfile.BadZipFile, ElementTree.ParseError, KeyError) as exc:
@@ -162,14 +204,25 @@ class Inbox:
             imported.append((note, text))
             report["new"] += 1
             report["notes"].append(self.vault.rel(note))
-        with _lock:
-            state = self.vault.state()
-            state["inbox_last_sync"] = datetime.now().isoformat(timespec="seconds")
-            self.vault.save_state(state)
-        if imported:
-            report["report"] = "\n\n".join(self._summary(note, text) for note, text in imported)
-            self.vault.commit(f"Aggiornamenti: {report['new']} file")
-        return report
+        return imported
+
+    def _start_audio(self, now: float | None, roots: list[tuple[Path, str]]) -> int:
+        """Hand new audio files to one background pass (never waited for: a long recording takes minutes).
+        Known files are skipped by size and date, without reading them. In the updates folder the author is
+        the colleague's subfolder; in the CEO's own folder every recording is his."""
+        known = self.vault.state().get("voice_files", {})
+        items, keys = [], set()
+        for folder, fonte in roots:
+            for path in candidates(folder, now, voice.AUDIO_SUFFIXES):
+                try:
+                    key = voice.stat_key(path)
+                except OSError:
+                    continue
+                if key not in known and key not in keys:  # one folder inside the other: listed once
+                    keys.add(key)
+                    items.append((path, author_of("", path, folder) if fonte == voice.FOLDER else "", key, fonte))
+        voice.VoiceMemos(self.host, self.vault).drain(items)
+        return len(items)
 
     def _write(self, path: Path, text: str, digest: str, today: date) -> Path:
         author = author_of(text, path, self.folder)
