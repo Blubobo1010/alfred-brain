@@ -33,15 +33,25 @@ at 03:00 on the model Alfred uses (cloud or local), or on the auxiliary slot `al
 ## Install
 
 ```bash
-alfred plugins install Blubobo1010/alfred-brain --enable   # sets memory.provider: brain
-alfred brain init                  # creates ~/Alfred-Vault (or --path …), sets OBSIDIAN_VAULT_PATH
-alfred brain setup                 # cron jobs: Plaud every 30 min, consolidation at 03:00
-alfred mcp add plaud --url https://mcp.plaud.ai/mcp --auth oauth   # then log in with the Plaud account
-alfred brain inbox --path "~/Library/CloudStorage/OneDrive-…/Aggiornamenti Alfred"   # optional
-alfred brain inbox --voice-path "~/Library/CloudStorage/OneDrive-…/Alfred"   # optional, the CEO's own folder
+alfred plugins install Blubobo1010/alfred-brain --enable
+alfred brain init
+alfred brain setup
+alfred mcp add plaud --url https://mcp.plaud.ai/mcp --auth oauth
 alfred gateway restart
 alfred brain status
 ```
+
+`install` sets `memory.provider: brain`; `init` creates `~/Alfred-Vault` (or `--path …`) and sets
+`OBSIDIAN_VAULT_PATH`; `setup` schedules Plaud every 30 minutes and consolidation at 03:00; after `mcp add`, log in
+with the Plaud account. Optional folders, then `alfred gateway restart` again:
+
+```bash
+alfred brain inbox --path "$HOME/Library/CloudStorage/OneDrive-Kimera/Aggiornamenti Alfred"
+alfred brain inbox --voice-path "$HOME/Library/CloudStorage/OneDrive-Kimera/Alfred"
+```
+
+`--path` is the colleagues' shared updates folder, `--voice-path` the CEO's own memo folder (take the exact
+OneDrive folder name from `ls ~/Library/CloudStorage/`).
 
 `alfred brain` commands exist only while `brain` is the active memory provider (Hermes wires the
 CLI of the active provider only). Other commands: `sync`, `inbox` (import now), `transcribe FILE…`,
@@ -54,16 +64,19 @@ audio on the machine, but it is not part of the standard install and Alfred tran
 default:
 
 ```bash
-alfred pm install --extra stt-whisper     # local faster-whisper
-alfred config set stt.provider local      # the audio never leaves the machine
-alfred config set stt.local.model turbo   # large-v3-turbo: good Italian; `base` (the default) is not
+alfred pm install --extra stt-whisper
+alfred config set stt.provider local
+alfred config set stt.local.model turbo
 alfred config set stt.language it
 alfred gateway restart
-alfred brain transcribe ~/test.m4a        # first use downloads the model (about 1.6 GB for turbo)
-alfred brain status                       # "stt": faster_whisper true, language it
+alfred brain transcribe ~/test.m4a
+alfred brain status
 ```
 
-These settings also apply to the voice messages recorded in Telegram.
+`stt.provider local` keeps the audio on the machine (the "not a recognized config key" warning is expected: Hermes
+leaves the key unset on purpose, and reads it). `turbo` is large-v3-turbo, good in Italian; the default `base` is not.
+The first transcription downloads the model (about 1.6 GB); `brain status` should show `faster_whisper: true` and
+`language: it`. These settings also apply to the voice messages recorded in Telegram.
 
 Speed on the CPU (int8), measured on an Apple M4 with 4 performance cores: `turbo` transcribes Italian at
 about 4× real time (a 10-minute memo in about 2.5 minutes), `small` at about 6.5× but with more mistakes.
@@ -99,8 +112,9 @@ Macs with more performance cores are faster.
 ## Development
 
 ```bash
-uv run --no-project --with pytest pytest -q tests   # fake vault, model and MCP; no network
+uv run --no-project --with pytest pytest -q tests
 uvx ruff check .
 ```
+The tests use a fake vault, model and MCP server: no network.
 Hermes contracts: from an Alfred checkout, `python -m hermes_cli.main plugins doctor <repo> --ci`
 and `plugins validate <repo>`.
