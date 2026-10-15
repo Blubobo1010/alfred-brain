@@ -2,7 +2,7 @@ import json
 import subprocess
 import sys
 import types
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -285,9 +285,9 @@ def test_a_dry_run_shows_the_next_meeting_worth_a_brief_and_saves_nothing(vault)
     assert not (vault.root / STATE_DIR / brief.STATE_FILE).exists() and not list((vault.root / "Riunioni").glob("*.md"))
     tomorrow = brief.run(host(event(60 * 20, agenda="Punti")), vault, now=NOW, send=False)
     assert tomorrow["testo"].startswith("📅 Sab 17/10 alle 10:30: Revisione Z20")
-    saturday = datetime(2026, 10, 24, 20, 0, tzinfo=ROME)  # summer time ends that night
-    sunday = {**event(0), "start": "2026-10-25T10:00+01:00", "end": "2026-10-25T11:00+01:00"}
-    after = brief.run(host(sunday), vault, now=saturday.astimezone(ROME).replace(tzinfo=None).astimezone(), send=False)
+    saturday = datetime(2026, 10, 24, 20, 0, tzinfo=timezone(timedelta(hours=2)))  # as now().astimezone() gives it
+    sunday = {**event(0), "start": "2026-10-25T10:00+01:00", "end": "2026-10-25T11:00+01:00"}  # summer time is over
+    after = brief.run(host(sunday), vault, now=saturday, send=False)
     assert after["testo"].startswith("📅 Dom 25/10 alle 10:00: Revisione Z20")
 
 
@@ -311,7 +311,7 @@ def test_due_prints_only_the_brief_and_saves_the_state_first(vault, monkeypatch,
     monkeypatch.setattr(sys, "__stdout__", out)
     monkeypatch.setenv("OBSIDIAN_VAULT_PATH", str(vault.root))
     monkeypatch.setattr("alfred_brain.host.HermesHost", lambda: host(event(32, agenda="Punti")))
-    args = types.SimpleNamespace(at="2026-10-16 14:30", due=True)
+    args = types.SimpleNamespace(at="2026-10-16 14:30+02:00", due=True)  # Rome time, wherever the tests run
     assert cli._brief(args) == 0
     assert out.text.startswith("📅 Alle 15:02 (tra 32 min): Revisione Z20") and out.text.endswith("«Punti»\n")
     captured = capsys.readouterr()
@@ -348,7 +348,8 @@ def test_setup_writes_the_script_then_creates_the_paused_job(tmp_path, monkeypat
     assert cli._setup(types.SimpleNamespace()) == 0 and created == []  # idempotent
 
 
-@pytest.mark.parametrize("value,expected", [("2026-10-16 14:30", (14, 30)), ("2026-10-16T09:05", (9, 5))])
+@pytest.mark.parametrize("value,expected", [("2026-10-16 14:30", (14, 30)), ("2026-10-16T09:05", (9, 5)),
+                                            ("2026-10-16 14:30+02:00", (14, 30))])
 def test_at_is_a_local_time(value, expected):
     when = brief.parse_now(value)
     assert (when.hour, when.minute) == expected and when.tzinfo is not None
