@@ -6,6 +6,7 @@ everything outside it belongs to the humans and is preserved byte for byte.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -24,6 +25,7 @@ JOURNAL_DIR = "Diario"
 PLAUD_DIR = "Plaud"
 UPDATES_DIR = "Aggiornamenti"
 VOICE_DIR = "Note vocali"
+MEETINGS_DIR = "Riunioni"
 ENTITY_DIRS = {"cliente": "Clienti", "persona": "Persone", "progetto": "Progetti"}
 INDEX_NOTE = "Indice.md"
 STATE_DIR = ".alfred"
@@ -41,6 +43,8 @@ Questo vault lo tiene aggiornato Alfred.
 - **Note vocali/**: una nota per ogni registrazione audio (memo dell'iPhone, audio dei collaboratori), con
   categoria, riassunto, cose da fare e trascrizione completa. L'audio non viene conservato.
 - **Clienti/**, **Persone/**, **Progetti/**: cosa Alfred ha imparato, con la fonte di ogni informazione.
+- **Riunioni/**: una nota per ogni riunione su cui Alfred ha mandato un brief, con chi c'era e cosa dicevano Odoo e
+  gli impegni in quel momento. Alfred la crea e non la riscrive più: quello che aggiungete resta.
 - **Impegni.md**: chi deve fare cosa ed entro quando, con un numero per ciascuno (#12). Nascono dalle note vocali e
   dalla chat; si chiudono o si correggono dicendolo ad Alfred. La nota viene riscritta a ogni modifica.
 
@@ -122,6 +126,29 @@ def atomic_write(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
+def create_exclusive(path: Path, text: str) -> bool:
+    """Write a new note, never over an existing one (someone may have written in it): False when it is already there.
+    Complete or absent, like ``atomic_write``: the text goes to a temporary file that is then linked into place."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp-", suffix=path.suffix)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.link(tmp, path)
+        return True
+    except FileExistsError:
+        return False
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+
+
+def entity_facts(note: Note) -> list[str]:
+    """What Alfred knows from an entity note's managed block, oldest first, without dates and sources."""
+    managed = _split_managed(note.body)[1]
+    return [_fact_text(ln) for ln in managed.splitlines() if ln.strip().startswith("- ")]
+
+
 class Vault:
     def __init__(self, root: Path | str | None = None):
         self.root = Path(root).expanduser() if root else vault_path()
@@ -135,7 +162,7 @@ class Vault:
         """Create the layout (idempotent). Returns True when the vault was new."""
         with _lock:
             new = not self.exists()
-            for sub in (JOURNAL_DIR, PLAUD_DIR, UPDATES_DIR, VOICE_DIR, *ENTITY_DIRS.values(), STATE_DIR):
+            for sub in (JOURNAL_DIR, PLAUD_DIR, UPDATES_DIR, VOICE_DIR, MEETINGS_DIR, *ENTITY_DIRS.values(), STATE_DIR):
                 (self.root / sub).mkdir(parents=True, exist_ok=True)
             if not (self.root / "LEGGIMI.md").exists():
                 atomic_write(self.root / "LEGGIMI.md", README)
@@ -255,15 +282,18 @@ class Vault:
 
     # ---- history --------------------------------------------------------------------------
 
-    def commit(self, message: str) -> bool:
+    def commit(self, message: str, paths: list[Path] | None = None) -> bool:
+        """Commit every change, or only ``paths``: a command running beside the gateway must not sweep in files the
+        gateway is halfway through writing."""
         if not (self.root / ".git").exists() or not shutil.which("git"):
             return False
         with _lock:
             env = {**os.environ, "GIT_AUTHOR_NAME": "Alfred", "GIT_AUTHOR_EMAIL": "alfred@localhost",
                    "GIT_COMMITTER_NAME": "Alfred", "GIT_COMMITTER_EMAIL": "alfred@localhost"}
-            subprocess.run(["git", "add", "-A"], cwd=self.root, check=False, capture_output=True, env=env)
-            done = subprocess.run(["git", "commit", "-q", "-m", message], cwd=self.root, check=False,
-                                  capture_output=True, env=env)
+            only = ["--", *(self.rel(p) for p in paths)] if paths else []
+            subprocess.run(["git", "add", *(only or ["-A"])], cwd=self.root, check=False, capture_output=True, env=env)
+            done = subprocess.run(["git", "commit", "-q", "-m", message, *(["--only", *only] if only else [])],
+                                  cwd=self.root, check=False, capture_output=True, env=env)
             return done.returncode == 0
 
 

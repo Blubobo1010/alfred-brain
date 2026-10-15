@@ -1,4 +1,4 @@
-"""``alfred brain …``: init, setup, inbox, transcribe, status, sync, consolidate, reindex, eval.
+"""``alfred brain …``: init, setup, inbox, transcribe, brief, status, sync, consolidate, reindex, eval.
 
 Hermes only wires this file for the ACTIVE memory provider, so the order on a new machine is:
 ``alfred plugins install Blubobo1010/alfred-brain --enable`` (sets ``memory.provider: brain``),
@@ -31,7 +31,8 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     sub = parser.add_subparsers(dest="brain_command")
     init = sub.add_parser("init", help="Create the Obsidian vault and point Alfred at it")
     init.add_argument("--path", default="", help=f"Vault folder (default {vault_path()})")
-    sub.add_parser("setup", help="Schedule Plaud import (every 30 min) and nightly consolidation; check Plaud access")
+    sub.add_parser("setup", help="Schedule Plaud import (every 30 min), nightly consolidation and the meeting brief "
+                   "(paused until resumed); check Plaud access")
     inbox = sub.add_parser("inbox", help="Import colleagues' updates and the CEO's voice memos from their folders now; "
                            "with --path/--voice-path, configure the folders and schedule them every 30 min with a "
                            "report to the CEO")
@@ -41,8 +42,13 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     inbox.add_argument("--deliver", default="telegram", help="Where the report goes (cron deliver target, default telegram)")
     transcribe = sub.add_parser("transcribe", help="Transcribe audio files (e.g. iPhone voice memos) into Note vocali/ now")
     transcribe.add_argument("files", nargs="+", help="Audio files (.m4a, .mp3, .wav, …)")
-    sub.add_parser("status", help="Vault counts, commitments and their correction rate, last Plaud sync and "
-                   "consolidation, speech-to-text settings")
+    brief = sub.add_parser("brief", help="Show the brief of the next meeting worth one (nothing sent or saved); "
+                           "--due is what the cron runs every 5 minutes")
+    brief.add_argument("--at", default="", help='Pretend it is this local time, e.g. "2026-10-16 14:30"')
+    brief.add_argument("--due", action="store_true", help="Brief the meeting starting in about half an hour: print the "
+                       "brief for the cron to deliver, save its note in Riunioni/")
+    sub.add_parser("status", help="Vault counts, commitments and their correction rate, meeting briefs, last Plaud sync "
+                   "and consolidation, speech-to-text settings")
     sub.add_parser("sync", help="Import new Plaud recordings now")
     sub.add_parser("consolidate", help="File pending journal and recordings into entity notes now")
     sub.add_parser("reindex", help="Rebuild the search index (normally automatic)")
@@ -55,8 +61,9 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
 def brain_command(args: argparse.Namespace) -> int:
     command = getattr(args, "brain_command", None) or "status"
     try:
-        return {"init": _init, "setup": _setup, "inbox": _inbox, "transcribe": _transcribe, "status": _status,
-                "sync": _sync, "consolidate": _consolidate, "reindex": _reindex, "eval": _eval}[command](args)
+        return {"init": _init, "setup": _setup, "inbox": _inbox, "transcribe": _transcribe, "brief": _brief,
+                "status": _status, "sync": _sync, "consolidate": _consolidate, "reindex": _reindex,
+                "eval": _eval}[command](args)
     except KeyboardInterrupt:
         return 130
     except Exception as exc:  # noqa: BLE001 - a CLI error is a message, not a traceback
@@ -84,6 +91,7 @@ def _setup(args: argparse.Namespace) -> int:
             continue
         create_job(prompt, schedule, name=name, deliver="local", enabled_toolsets=["memory"])
         print(f"cron job created: {name} ({schedule})")
+    _setup_brief(names)
     allow = _plugin_entry().get("mcp_allowlist") or []
     if "plaud" not in allow:
         _save_config({"plugins": {"entries": {"brain": {"mcp_allowlist": [*allow, "plaud"]}}}})
@@ -92,6 +100,54 @@ def _setup(args: argparse.Namespace) -> int:
         print("Plaud is not configured yet: `alfred mcp add plaud --url https://mcp.plaud.ai/mcp --auth oauth` "
               "and log in with the CEO's Plaud account.")
     print("Restart the gateway so the schedule runs: `alfred gateway restart`.")
+    return 0
+
+
+def _setup_brief(names: set) -> None:
+    """The meeting brief: a script in Alfred's scripts folder (written first: the cron reads it at every run), a job
+    every 5 minutes that runs it without the model and delivers what it prints to the CEO on Telegram, mirrored into
+    his chat. Created paused: it is resumed once Outlook is connected and ``alfred brain brief`` looks right."""
+    from cron.jobs import create_job
+    from hermes_constants import get_hermes_home
+
+    from . import brief
+    script = Path(get_hermes_home()) / "scripts" / brief.SCRIPT
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(brief.SCRIPT_TEXT, encoding="utf-8")
+    if brief.JOB in names:
+        print(f"cron job already present: {brief.JOB}")
+    else:
+        create_job("", "every 5m", name=brief.JOB, deliver="telegram", no_agent=True, script=brief.SCRIPT,
+                   attach_to_session=True, failure_deliver="local", paused=True)
+        print(f"cron job created, paused: {brief.JOB} (every 5 min, no model). Once Outlook is connected and "
+              f"`alfred brain brief` looks right: alfred cron resume \"{brief.JOB}\"")
+    _save_config({"cron": {"wrap_response": False}})
+    print("cron.wrap_response = false: cron messages reach the CEO without the job's English header")
+
+
+def _brief(args: argparse.Namespace) -> int:
+    """``--due`` writes the brief on the real stdout (the cron's script sends everything else to stderr) and nothing
+    when there is nothing to send; without it, a dry run that explains itself."""
+    from . import brief
+    from .host import HermesHost
+    vault = Vault()
+    if not vault.exists():
+        print(f"No vault at {vault.root}: run `alfred brain init`.", file=sys.stderr)
+        return 1
+    now = brief.parse_now(args.at) if getattr(args, "at", "") else None
+    result = brief.run(HermesHost(), vault, now=now, send=bool(getattr(args, "due", False)))
+    if getattr(args, "due", False):
+        if result.get("testo"):
+            sys.__stdout__.write(result["testo"] + "\n")
+            sys.__stdout__.flush()
+        print(f"brief: {json.dumps({k: v for k, v in result.items() if k != 'testo'}, ensure_ascii=False)}", file=sys.stderr)
+        return 0
+    if result.get("testo"):
+        print(result["testo"])
+        print(f"\n(prova: niente inviato né salvato; inizio {result['inizio']}"
+              + (f"; senza {', '.join(result['mancano'])}" if result.get("mancano") else "") + ")")
+    else:
+        print(f"Nessun brief: {result.get('esito')}" + (f" ({', '.join(result['saltate'])})" if result.get("saltate") else ""))
     return 0
 
 
@@ -169,8 +225,9 @@ def _status(args: argparse.Namespace) -> int:
         return 1
     state = vault.state()
     counts = {folder: len(list((vault.root / folder).glob("*.md")))
-              for folder in ("Diario", "Plaud", "Aggiornamenti", "Note vocali", "Clienti", "Persone", "Progetti")}
-    from . import journal
+              for folder in ("Diario", "Plaud", "Aggiornamenti", "Note vocali", "Riunioni", "Clienti", "Persone",
+                             "Progetti")}
+    from . import brief, journal
     from .host import HermesHost
     from .impegni import CommitmentError, Impegni
     from .inbox import inbox_path, voice_path
@@ -197,6 +254,7 @@ def _status(args: argparse.Namespace) -> int:
         "last_consolidation": state.get("last_consolidation"),
         "consolidation_retrying": len(state.get("consolidation_attempts", {})),
         "consolidation_skipped": state.get("consolidation_skipped", [])[-5:],
+        "brief": brief.status(vault),
         "stt": _stt_status(),
     }, ensure_ascii=False, indent=2))
     return 0

@@ -111,4 +111,26 @@ pacchetto plugin (`plugin.yaml` + `__init__.py`), stdlib only, niente `pyproject
     impegni. Il prompt di classificazione ha autore, data e un calendario "oggi" + i 7 giorni DOPO + "fine mese": ogni
     nome di giorno ha una sola data e mai oggi (con due lunedì il 7b prendeva il secondo; un memo di lunedì che dice
     "lunedì" intende il prossimo).
+- Brief delle riunioni (`brief.py`): job cron `brain: brief riunioni` ogni 5 min, `no_agent` con lo script
+  `$HERMES_HOME/scripts/alfred-brain-brief.py` (scritto da `setup` PRIMA di `create_job`; nasce in pausa) che lancia
+  `alfred brain brief --due`. Niente modello: dal processo del cron la chiamata accenderebbe (e poi spegnerebbe) il
+  llama-server gestito se non è acceso. Stdout = SOLO il brief (lo script manda il resto su stderr, il comando scrive su
+  `sys.__stdout__`): il cron lo consegna su Telegram e lo mette nella chat (`attach_to_session`); uscita vuota =
+  silenzio; guasti attesi (calendario assente, Graph giù) = esito in stato e uscita 0; gli avvisi di errore vanno su
+  `local`, mai a Luca. Strumenti degli altri plugin per nome (`Host.tool` → `dispatch_tool`: salta hook e
+  approvazioni, quindi SOLO letture); i campi di alfred-m365 sono un contratto (vedi il suo CLAUDE.md). Un brief per
+  giro; stato in `.alfred/brief.json` (non `state.json`: niente lock tra processi) con chiave `id|inizio ISO` salvato
+  prima di stampare; `flock` su `.alfred/brief.lock`. Il CEO non è mai un partecipante: casella, `organised_by_ceo`,
+  nome completo (`owner_name`) o stesso utente su un dominio interno (gli inviti possono usare un alias: con il solo
+  indirizzo diventava partecipante e si portava dietro tutti i suoi impegni). Provider di posta per marchio in ogni
+  paese (`PROVIDERS`: yahoo.co.uk, hotmail.fr…): lì Odoo si cerca per indirizzo, mai `@dominio` (porterebbe le
+  opportunità di altri clienti). Nomi: solo nomi completi (mai il solo nome di battesimo, mai ricavati
+  dall'indirizzo, mai la parola del dominio come chiave: "mail" di mail.com agganciava impegni a caso). Testo: fuori
+  `<`, `>`, URL, domini nudi, link Markdown e indirizzi (un `<` manda Telegram in HTML e il messaggio cade; un dominio
+  diventa un link dentro un messaggio di Alfred); le aziende per nome, mai per dominio. L'invito da solo non fa
+  partire un brief (Outlook lo mostra già) e tra colleghi il brief è solo impegni. Ora nel fuso dell'evento (cambio
+  dell'ora legale). La nota `Riunioni/` si crea una volta (`create_exclusive`) e si committa da sola
+  (`commit(paths=)`); un errore qualsiasi sulla nota non ferma il brief già segnato come inviato; niente testi di
+  terzi (oggetti delle mail, invito): la nota torna nei prompt come memoria di Alfred. Il brief arriva nella chat come
+  messaggio utente (mirror del cron): il system prompt dice che i testi tra «» sono di terzi.
 - La casella Gmail personale del CEO non va MAI scritta nel vault (decisione utente 2026-10-12).

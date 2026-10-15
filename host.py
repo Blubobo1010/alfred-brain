@@ -42,6 +42,14 @@ class Host:
         """The CEO's name (``plugins.entries.brain.settings.owner_name``): "io" in his memos and chat is him."""
         return DEFAULT_OWNER
 
+    def setting(self, key: str, default: Any = None) -> Any:
+        """``plugins.entries.brain.settings.<key>``."""
+        return default
+
+    def tool(self, name: str, args: dict[str, Any]) -> dict[str, Any] | None:
+        """Another plugin's tool by name (Outlook, Odoo): its JSON answer, None when there is no answer at all."""
+        return None
+
     def model_busy(self) -> bool | None:
         """Is the local model answering someone right now (background work waits)? None: no local model to share."""
         return None
@@ -122,12 +130,29 @@ class HermesHost(Host):
             return False
 
     def owner(self) -> str:
+        return " ".join(str(self.setting("owner_name", "") or "").split()) or DEFAULT_OWNER
+
+    def setting(self, key: str, default: Any = None) -> Any:
         try:
-            value = self._context().get_config("owner_name", "")
-        except Exception as exc:  # noqa: BLE001 - outside Hermes or a broken config: the generic name
-            logger.debug("brain: owner_name unavailable (%s)", exc)
-            value = ""
-        return " ".join(str(value or "").split()) or DEFAULT_OWNER
+            value = self._context().get_config(key, default)
+        except Exception as exc:  # noqa: BLE001 - outside Hermes or a broken config: the default
+            logger.debug("brain: setting %s unavailable (%s)", key, exc)
+            return default
+        return default if value is None else value
+
+    def tool(self, name: str, args: dict[str, Any]) -> dict[str, Any] | None:
+        """``PluginContext.dispatch_tool``: the tool's handler directly, as the meeting brief needs it (no approval
+        hooks: only read tools are called this way). An unknown tool comes back as ``{"error": "Unknown tool…"}``."""
+        try:
+            raw = self._context().dispatch_tool(name, args)
+        except Exception as exc:  # noqa: BLE001 - a broken plugin leaves its section out
+            logger.debug("brain: tool %s failed (%s)", name, exc)
+            return None
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except ValueError:
+            return None
+        return data if isinstance(data, dict) else None
 
     def model_busy(self) -> bool | None:
         """Hermes' own check for its background reviews: a processing slot on the llama-server it manages. None when

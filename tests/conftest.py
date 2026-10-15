@@ -35,12 +35,14 @@ class FakeHost(Host):
     """``llm_json`` answers from a queue (or a callable); ``mcp`` answers from a {tool: response} table;
     ``transcribe`` from a {file name: text or exception} table (or a callable), held by ``gate`` while it is closed;
     ``wake_inbox`` counts in ``wakes``; ``owner`` is the CEO's configured name; ``busy`` answers ``model_busy`` (a
-    callable, a list consumed one per check, or a fixed value). No background passes unless ``background=True``:
-    a test reads the model's answers in order."""
+    callable, a list consumed one per check, or a fixed value); ``tools`` answers other plugins' tools by name (a dict
+    or a callable of the arguments; unknown names get Hermes' "Unknown tool" error) and ``settings`` the plugin's
+    settings. No background passes unless ``background=True``: a test reads the model's answers in order."""
 
     def __init__(self, llm: Any = None, mcp: dict[str, Any] | None = None, params: dict[str, list[str]] | None = None,
                  transcripts: Any = None, gate: threading.Event | None = None, owner: str = "il CEO",
-                 busy: Any = None, background: bool = False):
+                 busy: Any = None, background: bool = False, tools: dict[str, Any] | None = None,
+                 settings: dict[str, Any] | None = None):
         self.llm = llm
         self.mcp_table = mcp or {}
         self.params = params or {}
@@ -55,6 +57,9 @@ class FakeHost(Host):
         self.transcribe_calls: list[str] = []
         self.busy_checks = 0
         self.wakes = 0
+        self.tools = tools or {}
+        self.settings = settings or {}
+        self.tool_calls: list[tuple[str, dict]] = []
 
     def llm_json(self, instructions, text, schema):
         self.llm_calls.append(text)
@@ -80,6 +85,16 @@ class FakeHost(Host):
         if isinstance(self.busy, list):
             return self.busy.pop(0) if self.busy else False
         return self.busy
+
+    def setting(self, key, default=None):
+        return self.settings.get(key, default)
+
+    def tool(self, name, args):
+        self.tool_calls.append((name, dict(args)))
+        if name not in self.tools:
+            return {"error": f"Unknown tool: {name}"}
+        answer = self.tools[name]
+        return answer(args) if callable(answer) else answer
 
     def mcp(self, server, tool, args, timeout=60):
         self.mcp_calls.append((server, tool, dict(args)))

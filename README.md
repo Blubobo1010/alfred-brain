@@ -23,6 +23,8 @@ The second brain of [Alfred](https://github.com/Blubobo1010/Alfred-Ai-Audit) / H
   personale), and keeps summary, commitments and the full transcript. The audio itself is never copied.
 - **Impegni.md** — the commitments Alfred tracks: who must do what, by when, each with a number (#12). See
   [Commitments](#commitments).
+- **Riunioni/** — a brief on Telegram half an hour before each meeting, and a note per meeting briefed. See
+  [Meeting briefs](#meeting-briefs).
 - Recall before every turn (names and aliases first, then keyword search, model-free, plus the open commitments
   of the people named) and eight tools: `brain_search`, `brain_read`, `brain_note`, `brain_sync`, `brain_inbox`,
   `brain_transcribe`, `brain_consolidate`, `brain_impegni`.
@@ -77,6 +79,35 @@ change. One memo per line, `autore` omitted for the CEO:
 `tests/fixtures/eval-sintetico.jsonl` is a small invented set. Real memos are client data: label them on the
 client's machine and never put them in a repository.
 
+## Meeting briefs
+
+Half an hour before a meeting the CEO gets a brief on Telegram: the open Odoo deals of the outside company, the latest
+mail with the people invited (date, who, subject), what the vault knows about them and their company, the open
+commitments of everyone at the meeting and his own that name them, and the invitation's own words. A meeting among
+colleagues gets one only when someone there owes something; a meeting nothing is known about gets none. Cancelled,
+declined, all-day and private meetings are left alone.
+
+- No model: the brief is assembled from data, the same on any model and at no cost. Alfred's cron runs
+  `alfred brain brief --due` every 5 minutes as a script; what it prints reaches the CEO on Telegram and goes into his
+  chat, so Alfred knows the brief when he answers it.
+- Calendar and mail come from [alfred-m365](https://github.com/Blubobo1010/alfred-m365) 0.2.0 or later, deals from
+  [alfred-odoo](https://github.com/Blubobo1010/alfred-odoo) (`crm` area). Their tools are called by name: a missing
+  or refusing one leaves its section out.
+- Each brief leaves a note in `Riunioni/` (who was there, Odoo and the commitments at that moment), created once and
+  never rewritten. Mail subjects and invitation text go to the CEO, never into the vault.
+
+`alfred brain setup` creates the job **paused** and sets `cron.wrap_response: false` (cron messages without the job's
+English header). Once Outlook is connected:
+
+```bash
+alfred brain brief
+alfred cron resume "brain: brief riunioni"
+```
+
+`alfred brain brief` shows the brief of the next meeting worth one and sends or saves nothing (`--at "2026-10-16
+14:30"` pretends it is another time). Settings: `brief_minutes` (default 30) and `internal_domains` (the company's
+other mail domains: their people are colleagues).
+
 ## Install
 
 ```bash
@@ -89,7 +120,8 @@ alfred brain status
 ```
 
 `install` sets `memory.provider: brain`; `init` creates `~/Alfred-Vault` (or `--path …`) and sets
-`OBSIDIAN_VAULT_PATH`; `setup` schedules Plaud every 30 minutes and consolidation at 03:00; after `mcp add`, log in
+`OBSIDIAN_VAULT_PATH`; `setup` schedules Plaud every 30 minutes, consolidation at 03:00 and the meeting brief
+(paused); after `mcp add`, log in
 with the Plaud account. Optional folders, then `alfred gateway restart` again:
 
 ```bash
@@ -101,7 +133,7 @@ alfred brain inbox --voice-path "$HOME/Library/CloudStorage/OneDrive-Kimera/Alfr
 OneDrive folder name from `ls ~/Library/CloudStorage/`).
 
 `alfred brain` commands exist only while `brain` is the active memory provider (Hermes wires the
-CLI of the active provider only). Other commands: `sync`, `inbox` (import now), `transcribe FILE…`,
+CLI of the active provider only). Other commands: `sync`, `inbox` (import now), `transcribe FILE…`, `brief`,
 `consolidate`, `reindex`, `eval FILE.jsonl`. A command links what it imported before it exits.
 
 ## Voice memos
@@ -156,6 +188,9 @@ Macs with more performance cores are faster.
   (`alfred brain setup` does it); no other network access.
 - Runs `git` in the vault folder when git is installed.
 - Moves its own updates cron job to the next tick when a recording nobody is waiting for is filed.
+- Writes `alfred-brain-brief.py` in Alfred's scripts folder, which the meeting-brief cron job runs every 5 minutes
+  once resumed. It calls the Outlook and Odoo plugins' read tools by name, directly: no approval prompt, and only
+  `outlook_list_events`, `outlook_search_mail` and `odoo_search_leads`. `setup` also sets `cron.wrap_response: false`.
 
 ## Development
 

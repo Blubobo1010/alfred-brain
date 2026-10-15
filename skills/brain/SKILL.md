@@ -8,7 +8,8 @@ description: Use the CEO's second brain (Obsidian vault kept by Alfred) — reca
 The vault holds a daily journal of every conversation (`Diario/`), one note per Plaud recording
 (`Plaud/`), colleagues' written updates (`Aggiornamenti/`), one note per voice memo (`Note vocali/`), notes on
 clients, people and projects (`Clienti/`, `Persone/`, `Progetti/`) whose "Cosa sa Alfred" block lists facts with
-their source, and the commitments Alfred tracks (`Impegni.md`, each with a number like #12).
+their source, the commitments Alfred tracks (`Impegni.md`, each with a number like #12) and one note per meeting
+briefed (`Riunioni/`).
 
 ## How to work
 
@@ -38,4 +39,7 @@ their source, and the commitments Alfred tracks (`Impegni.md`, each with a numbe
 7. Never edit text outside the `<!-- alfred:inizio -->` … `<!-- alfred:fine -->` block of a note:
    that part is written by humans. `Impegni.md` is rewritten from Alfred's store: change commitments only with
    `brain_impegni`.
-8. The personal mailbox is never copied into the vault.
+8. Half an hour before a meeting the CEO receives a brief from you (a chat message starting with
+   `[Cron delivery: brain: brief riunioni]`): when he answers it, the meeting is the one in that brief. Its note is in
+   `Riunioni/`; open the emails it lists with the Outlook tools if he asks what they said.
+9. The personal mailbox is never copied into the vault.
