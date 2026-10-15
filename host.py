@@ -18,6 +18,12 @@ PLUGIN_ID = "brain"
 AUX_TASK = "alfred_brain"
 STT_SOURCE = "alfred-brain"  # the caller label Hermes passes to pre_transcription hooks
 INBOX_JOB = "brain: aggiornamenti dalla cartella"  # the cron job that reports folder updates and voice memos
+DEFAULT_OWNER = "il CEO"
+RELAXED_SCHEMA: dict[str, Any] = {"type": "object"}  # the retry after an answer outside the strict schema
+AUX_TASK_INFO: dict[str, Any] = {  # one place for the gateway's register() and the CLI
+    "display_name": "Secondo cervello (consolidamento)",
+    "description": "Model that files conversations, recordings and voice memos into client, person and project notes.",
+    "inherit_from": "compression"}
 
 
 class TranscriptionError(RuntimeError):
@@ -25,8 +31,20 @@ class TranscriptionError(RuntimeError):
 
 
 class Host:
+    wake = True  # move the updates job up when a recording nobody waits for is filed (the CLI prints its own)
+    background = True  # link new items in a background pass (the CLI runs the pass itself before exiting)
+    answered_by = ""  # "provider/model" of the last answer (``brain eval`` reports what it really measured)
+
     def llm_json(self, instructions: str, text: str, schema: dict[str, Any]) -> dict[str, Any] | None:
         raise NotImplementedError
+
+    def owner(self) -> str:
+        """The CEO's name (``plugins.entries.brain.settings.owner_name``): "io" in his memos and chat is him."""
+        return DEFAULT_OWNER
+
+    def model_busy(self) -> bool | None:
+        """Is the local model answering someone right now (background work waits)? None: no local model to share."""
+        return None
 
     def mcp(self, server: str, tool: str, args: dict[str, Any], timeout: float = 60) -> dict[str, Any]:
         raise NotImplementedError
@@ -54,6 +72,7 @@ class HermesHost(Host):
     def __init__(self) -> None:
         self._ctx: Any = None
         self.wake = True  # the CLI prints its own reports: there the gateway's cron must not race it
+        self.background = True
 
     def _context(self) -> Any:
         if self._ctx is None:
@@ -62,18 +81,66 @@ class HermesHost(Host):
         return self._ctx
 
     def llm_json(self, instructions: str, text: str, schema: dict[str, Any]) -> dict[str, Any] | None:
+        """The strict schema guides the model (on a local server it becomes the decoding grammar: lists and required
+        fields are always respected). A provider that does not enforce it may answer outside it, and Hermes then
+        throws the whole answer away: once more with a bare object schema, and the plugin normalises the result."""
         from agent.plugin_llm import PluginLlmTextInput
         llm = self._context().llm
-        kwargs = dict(instructions=instructions, input=[PluginLlmTextInput(text=text)], json_schema=schema,
-                      schema_name="estrazione", temperature=0, timeout=180, purpose="alfred-brain consolidation")
+        kwargs = dict(instructions=instructions, input=[PluginLlmTextInput(text=text)], schema_name="estrazione",
+                      temperature=0, timeout=180, purpose="alfred-brain consolidation")
+
+        def complete(json_schema: dict[str, Any]) -> Any:
+            try:
+                return llm.complete_structured(task=AUX_TASK, json_schema=json_schema, **kwargs)
+            except PermissionError as exc:  # PluginLlmTrustError: the aux slot is not registered here (CLI)
+                logger.debug("brain: auxiliary task unavailable (%s), using the main model", exc)
+                return llm.complete_structured(json_schema=json_schema, **kwargs)
+
         try:
-            result = llm.complete_structured(task=AUX_TASK, **kwargs)
-        except Exception as exc:  # aux slot not registered in this process: the user's main model
-            logger.debug("brain: auxiliary task unavailable (%s), using the main model", exc)
-            result = llm.complete_structured(**kwargs)
+            result = complete(schema)
+        except ValueError as exc:
+            if "schema" not in str(exc):
+                raise
+            logger.info("brain: answer outside the schema (%s), asking again without constraints", exc)
+            # The relaxed schema is what Hermes shows the model, so the shape we want goes in the instructions.
+            kwargs["instructions"] = (f"{instructions}\n\nRispondi con un oggetto JSON di questa forma (le liste "
+                                      f"sono liste, anche di un solo elemento): {json.dumps(schema, ensure_ascii=False)}")
+            result = complete(RELAXED_SCHEMA)
+        self.answered_by = "/".join(str(v) for v in (getattr(result, "provider", ""), getattr(result, "model", "")) if v)
         if isinstance(result.parsed, dict):
             return result.parsed
         return json_object(result.text)
+
+    def register_aux_task(self) -> bool:
+        """A CLI command runs without ``register()``: register the ``alfred_brain`` slot here too, so the command uses
+        the model the gateway uses instead of falling back to the main one."""
+        try:
+            self._context().register_auxiliary_task(AUX_TASK, **AUX_TASK_INFO)
+            return True
+        except Exception as exc:  # noqa: BLE001 - the main model still answers
+            logger.debug("brain: auxiliary task not registered in this process (%s)", exc)
+            return False
+
+    def owner(self) -> str:
+        try:
+            value = self._context().get_config("owner_name", "")
+        except Exception as exc:  # noqa: BLE001 - outside Hermes or a broken config: the generic name
+            logger.debug("brain: owner_name unavailable (%s)", exc)
+            value = ""
+        return " ".join(str(value or "").split()) or DEFAULT_OWNER
+
+    def model_busy(self) -> bool | None:
+        """Hermes' own check for its background reviews: a processing slot on the llama-server it manages. None when
+        Hermes manages no local model (a cloud model has nothing to share) or the check is unavailable."""
+        try:
+            from agent.auxiliary_client import _managed_local_netloc
+            if not _managed_local_netloc():
+                return None
+            from agent.review_idle_queue import _managed_server_idle
+            return not _managed_server_idle()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("brain: local model state unavailable (%s)", exc)
+            return None
 
     def mcp(self, server: str, tool: str, args: dict[str, Any], timeout: float = 60) -> dict[str, Any]:
         _connect(server)
@@ -163,6 +230,16 @@ def _envelope(raw: Any) -> dict[str, Any]:
             out["structuredContent"] = parsed["structuredContent"]
         return out
     return {"ok": True, "result": parsed if parsed is not None else raw}
+
+
+def as_list(value: Any) -> list:
+    """A field the model should have given as a list: a lone string or object becomes a one-item list (iterating a
+    string would file one item per character), anything else empty."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return [value] if isinstance(value, (str, dict)) and value else []
 
 
 def json_object(text: str | None) -> dict[str, Any] | None:

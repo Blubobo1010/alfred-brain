@@ -47,16 +47,85 @@ def test_memo_becomes_a_categorised_note(vault, tmp_path):
     assert note.meta["argomenti"] == ["Beta Compositi", "Z20", "Marco Bianchi acquisti"]
     assert note.meta["tags"] == ["nota-vocale", "decisione", "fornitori"]
     assert "Categoria: decisione · Area: fornitori · Argomenti: Beta Compositi" in note.body
-    assert "## Riassunto" in note.body and "## Da fare\n\n- Mandare a Bianchi" in note.body
+    assert "## Riassunto" in note.body and "## Da fare\n\n- #1 il CEO: Mandare a Bianchi i disegni del cofano\n" in note.body
     assert "## Trascrizione\n\nHo sentito Marco Bianchi" in note.body
     state = vault.state()
     assert state["voice_seen"] == {voice.file_digest(path): out["note"]} and state["voice_pending"] == [out["note"]]
     assert state["voice_report"] == []  # this caller tells the user: not again in the updates report
     assert out["report"].startswith("Nota vocale «Preventivo Beta per i pannelli Z20» (decisione · fornitori)")
-    assert "Da fare:\n- Mandare a Bianchi" in out["report"] and "Da vedere" not in out["report"]
+    assert ("Impegni:\n#1 Tu — Mandare a Bianchi i disegni del cofano\n"
+            "Se uno non è giusto dimmelo (es. «il 1 è di Marco, entro lunedì»).") in out["report"]
+    assert "Da vedere" not in out["report"] and out["impegni"] == [1]
     assert out["report"].endswith(f"Testo completo: [[{out['note'][:-3]}]]")
-    assert "Marco Bianchi" in host.llm_calls[0]
+    prompt = host.llm_calls[0]
+    assert "Marco Bianchi" in prompt and "Autore della nota: il CEO." in prompt and "Calendario: " in prompt
     assert host.wakes == 0  # the caller got it: no updates report needed
+
+
+MEETING = ("Riunione con Andrea Lorini sulla digitalizzazione. Andrea mi manda i tre compiti entro venerdì. "
+           "Io chiamo Marco Bianchi per il preventivo.")
+
+
+def test_actions_become_numbered_commitments_with_who_and_when(vault, tmp_path):
+    from datetime import date
+
+    from alfred_brain.impegni import Impegni
+    path = memo(tmp_path, "riunione.m4a")
+    stamp = os.path.getmtime(path)
+    when = date.fromtimestamp(stamp)
+    friday = next(when.fromordinal(when.toordinal() + i) for i in range(7) if when.fromordinal(when.toordinal() + i).weekday() == 4)
+    acts = [{"chi": "Andrea Lorini", "cosa": "mandare i tre compiti", "entro": friday.isoformat(), "stesso_di": 0,
+             "evidenza": "Andrea mi manda i tre compiti entro venerdì"},
+            {"chi": "io", "cosa": "chiamare Marco Bianchi per il preventivo", "entro": "", "evidenza": "Io chiamo Marco Bianchi"},
+            {"chi": "Alfred", "cosa": "ricordarmelo"}]
+    host = FakeHost(llm=[{**INFO, "azioni": acts}], transcripts={"riunione.m4a": MEETING}, owner="Luca Betti")
+    out = VoiceMemos(host, vault).run(path, fonte="telegram", autore="Luca")
+    assert out["impegni"] == [1, 2]
+    assert f"#1 Andrea Lorini — mandare i tre compiti — entro ven {friday.day:02d}/{friday.month:02d}" in out["report"]
+    assert "#2 Tu — chiamare Marco Bianchi per il preventivo" in out["report"] and "ricordarmelo" not in out["report"]
+    note = (vault.root / out["note"]).read_text(encoding="utf-8")
+    assert f"- #1 Andrea Lorini: mandare i tre compiti 📅 {friday.isoformat()}" in note and "- #2 Luca Betti: chiamare" in note
+    stored = Impegni(vault).load()["impegni"]
+    assert [i["fonte"] for i in stored] == [f"[[{out['note'][:-3]}]]"] * 2 and stored[0]["riscontro"] is True
+    assert "Autore della nota: Luca Betti (il CEO)." in host.llm_calls[0] and when.isoformat() in host.llm_calls[0]
+
+    later = memo(tmp_path, "seguito.m4a", b"seguito")
+    host.llm = [{**INFO, "titolo": "Seguito", "azioni": [{"chi": "Andrea", "cosa": "mandare i compiti", "stesso_di": 1}]}]
+    host.transcripts = {"seguito.m4a": "Sentito Andrea, i compiti arrivano."}
+    again = VoiceMemos(host, vault).run(later, fonte="telegram", autore="Luca")
+    assert "Impegni già aperti (numero, chi, cosa):\n#2 Luca Betti — chiamare" in host.llm_calls[1]
+    assert "#1 Andrea Lorini — mandare i tre compiti" in host.llm_calls[1]
+    assert "#1 (già aperto) Andrea Lorini — mandare i tre compiti" in again["report"] and again["impegni"] == [1]
+    assert "(es. «il 1 è di Marco" in again["report"]
+
+
+def test_who_io_is_depends_on_who_recorded(vault, tmp_path):
+    other = memo(tmp_path, "andrea.m4a", b"andrea")
+    host = FakeHost(llm=[{**INFO, "azioni": [{"chi": "io", "cosa": "mandare il piano"}]}],
+                    transcripts={"andrea.m4a": "Io mando il piano."}, owner="Luca Betti")
+    out = VoiceMemos(host, vault).run(other, fonte="telegram", autore="Andrea Lorini")  # another user the bot allows
+    assert "#1 Andrea Lorini — mandare il piano" in out["report"]
+    assert "Autore della nota: Andrea Lorini (collaboratore)." in host.llm_calls[0]
+
+
+def test_a_damaged_commitments_file_still_files_the_memo(vault, tmp_path):
+    (vault.root / ".alfred" / "impegni.json").write_text("{rotto", encoding="utf-8")
+    path = memo(tmp_path, "f.m4a")
+    out = VoiceMemos(FakeHost(llm=[INFO], transcripts={"f.m4a": SPOKEN}), vault).run(path, fonte="telegram")
+    assert out["status"] == "done" and out["impegni"] == []
+    assert "Da fare:\n- Mandare a Bianchi i disegni del cofano" in out["report"]
+    assert "## Da fare\n\n- Mandare a Bianchi" in (vault.root / out["note"]).read_text(encoding="utf-8")
+
+
+def test_a_filed_memo_is_linked_in_the_background(vault, tmp_path):
+    from alfred_brain import consolidate
+    path = memo(tmp_path, "g.m4a")
+    facts = {"entita": [{"tipo": "cliente", "nome": "Beta Compositi", "fatti": [{"testo": "Preventivo sotto 45.000 euro."}]}]}
+    host = FakeHost(llm=[INFO, facts], transcripts={"g.m4a": SPOKEN}, background=True)
+    out = VoiceMemos(host, vault).run(path, fonte="telegram")
+    assert out["status"] == "done" and consolidate.wait_idle(5)
+    assert vault.state()["voice_pending"] == []
+    assert f"([[{out['note'][:-3]}]])" in (vault.root / "Clienti" / "Beta Compositi.md").read_text(encoding="utf-8")
 
 
 def test_same_recording_twice_is_filed_once_unless_its_note_was_deleted(vault, tmp_path):
@@ -315,3 +384,10 @@ def test_hermes_host_maps_the_stt_result(monkeypatch, tmp_path):
     with pytest.raises(TranscriptionError, match="not available"):
         host.transcribe(path)
     assert host.local_path("~/memo.m4a") == path.home() / "memo.m4a"
+
+
+def test_an_unreadable_commitments_file_still_files_the_memo(vault, tmp_path):
+    (vault.root / ".alfred" / "impegni.json").write_bytes(b"\xff\xfe{")
+    path = memo(tmp_path, "h.m4a")
+    out = VoiceMemos(FakeHost(llm=[INFO], transcripts={"h.m4a": SPOKEN}), vault).run(path, fonte="telegram")
+    assert out["status"] == "done" and "Da fare:\n- Mandare a Bianchi" in out["report"]

@@ -1,5 +1,6 @@
-"""The memory provider: journal every turn, recall from the vault before each turn, consolidate at
-session end, and seven small tools (search, read, note, Plaud sync, folder updates, voice memos, consolidate)."""
+"""The memory provider: journal every turn, recall from the vault (and the open commitments) before each turn, link
+new items in the background, and eight small tools (search, read, note, Plaud sync, folder updates, voice memos,
+consolidate, commitments)."""
 
 from __future__ import annotations
 
@@ -9,17 +10,17 @@ from datetime import date
 from typing import Any
 
 from . import consolidate, journal
-from .host import HermesHost, Host
+from .host import DEFAULT_OWNER, HermesHost, Host
+from .impegni import CommitmentError, Impegni, report_line, same_person
 from .inbox import Inbox, voice_path
 from .index import Index, recall_block
 from .plaud import Plaud, PlaudError
-from .vault import ENTITY_DIRS, Vault
+from .vault import ENTITY_DIRS, Vault, normalize
 from .voice import VoiceMemos
 
 try:
-    from agent.memory_provider import MemoryProvider, RecallStatus, is_trivial_prompt, spawn_context_thread
+    from agent.memory_provider import MemoryProvider, RecallStatus, is_trivial_prompt
 except ImportError:  # outside Hermes (unit tests): the same surface, minimal
-    import threading
     from abc import ABC
     from dataclasses import dataclass
 
@@ -35,9 +36,6 @@ except ImportError:  # outside Hermes (unit tests): the same surface, minimal
     def is_trivial_prompt(text):  # type: ignore[no-redef]
         stripped = (text or "").strip()
         return not stripped or stripped.startswith("/") or stripped.lower().rstrip("!.?") in {"ok", "si", "sì", "grazie", "ciao", "no"}
-
-    def spawn_context_thread(target, *, name, daemon=True, args=(), kwargs=None):  # type: ignore[no-redef]
-        return threading.Thread(target=target, name=name, daemon=daemon, args=args, kwargs=kwargs)
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +71,21 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {"name": "brain_consolidate",
      "description": "File what was said in recent conversations and recordings into the client, person and project notes.",
      "parameters": {"type": "object", "properties": {}}},
+    {"name": "brain_impegni",
+     "description": "Commitments Alfred tracks: who must do what, by when, each with a number (#12). Voice memos record "
+                    "them by themselves. azione 'elenca': open ones (chi='io' for the user's own, or a person; scaduti for "
+                    "overdue ones). 'aggiungi': one the user states ('Marco mi manda il disegno entro giovedì'). "
+                    "'modifica': by number, close it (stato 'fatto'), cancel a wrong one ('annullato'), reopen it ('aperto') "
+                    "or correct chi, cosa, entro ('il 13 è di Marco, entro lunedì').",
+     "parameters": {"type": "object", "properties": {
+         "azione": {"type": "string", "enum": ["elenca", "aggiungi", "modifica"]},
+         "id": {"type": "integer", "description": "The commitment's number, for modifica"},
+         "chi": {"type": "string", "description": "Who must do it: a name, or 'io' for the user"},
+         "cosa": {"type": "string", "description": "What, short, verb first ('mandare il disegno del cofano')"},
+         "entro": {"type": "string", "description": "Due date YYYY-MM-DD"},
+         "stato": {"type": "string", "enum": ["aperto", "fatto", "annullato"]},
+         "scaduti": {"type": "boolean", "description": "elenca: only overdue ones"}},
+         "required": ["azione"]}},
 ]
 
 
@@ -126,7 +139,9 @@ class BrainProvider(MemoryProvider):
                 "vocali (Note vocali/). Prima di rispondere su persone, aziende, incontri, stato di produzione o "
                 "conversazioni passate usa brain_search; cita le note come [[percorso]]. Salva con brain_note ciò che "
                 "l'utente chiede di ricordare. Quando l'utente invia un file audio (una nota vocale), chiama "
-                "brain_transcribe con il suo percorso e riferisci il campo report."
+                "brain_transcribe con il suo percorso e riferisci il campo report. Gli impegni (chi deve fare cosa, "
+                "entro quando, con un numero come #12) li tieni con brain_impegni: aggiungi quelli che l'utente "
+                "dice, chiudi o correggi per numero quando lo chiede, elenca quando chiede cosa deve fare qualcuno."
                 + (" Se un audio viene scartato perché troppo grande per la chat, non chiedere un file più piccolo: "
                    "digli di salvarlo nella sua cartella di Alfred su OneDrive (Condividi → Salva in File), il "
                    "riassunto arriva entro mezz'ora." if voice_path() else ""))
@@ -139,10 +154,23 @@ class BrainProvider(MemoryProvider):
             return ""
         try:
             block, self._last_recall = recall_block(self._index, query)
-            return block
         except Exception as exc:  # noqa: BLE001 - recall must never break a turn
             logger.debug("brain: prefetch failed: %s", exc)
-            self._last_recall = 0
+            block, self._last_recall = "", 0
+        commitments = self._commitments_block(query)
+        if commitments:
+            self._last_recall += 1
+            block = f"{block}\n\n{commitments}" if block else commitments
+        return block
+
+    def _commitments_block(self, query: str) -> str:
+        """Open commitments of the people, clients and projects the message names (names from the index, no model)."""
+        try:
+            words = f" {normalize(query)} "
+            named = {n for d in self._index.docs.values() if d.kind in ENTITY_DIRS for n in d.names if f" {n} " in words}
+            return Impegni(self.vault).prefetch_block(query, named)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("brain: commitments recall failed: %s", exc)
             return ""
 
     def recall_status(self) -> RecallStatus | None:
@@ -165,15 +193,9 @@ class BrainProvider(MemoryProvider):
     def on_session_end(self, messages: list[dict[str, Any]]) -> None:
         if not self.writes:
             return
-        # Off the caller's thread: a gateway eviction or CLI exit must not wait for the model.
-        # If the process dies first, the nightly brain_consolidate catches up (offsets in the vault state).
-        spawn_context_thread(self._consolidate_quietly, name="brain-consolidate").start()
-
-    def _consolidate_quietly(self) -> None:
-        try:
-            consolidate.run(self.host, self.vault)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("brain: consolidation failed: %s", exc)
+        # The background pass: a gateway eviction or CLI exit never waits for the model. If the process dies first,
+        # the nightly brain_consolidate catches up (offsets and queues are in the vault state).
+        consolidate.kick(self.host, self.vault)
 
     # ---- tools ----------------------------------------------------------------------------
 
@@ -221,14 +243,14 @@ class BrainProvider(MemoryProvider):
 
     def _tool_sync(self, args: dict[str, Any]) -> dict[str, Any]:
         report = Plaud(self.host, self.vault).sync()
-        if report["new"]:
-            report["consolidation"] = consolidate.run(self.host, self.vault)
+        if report["new"]:  # in the background: a long backlog must not run past the tool's deadline
+            report["consolidation"] = consolidate.link(self.host, self.vault)
         return {"ok": True, **report}
 
     def _tool_inbox(self, args: dict[str, Any]) -> dict[str, Any]:
         report = Inbox(self.host, self.vault).sync()
-        if report["new"]:
-            report["consolidation"] = consolidate.run(self.host, self.vault)
+        if report["new"]:  # in the background, or the report would be lost when the backlog outlasts the tool
+            report["consolidation"] = consolidate.link(self.host, self.vault)
         return {"ok": True, **report}
 
     def _tool_transcribe(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -239,7 +261,35 @@ class BrainProvider(MemoryProvider):
         return result
 
     def _tool_consolidate(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {"ok": True, **consolidate.run(self.host, self.vault)}
+        return {"ok": True, **consolidate.link(self.host, self.vault)}
+
+    def _tool_impegni(self, args: dict[str, Any]) -> dict[str, Any]:
+        owner = self.host.owner()
+        # "io" is whoever writes: the CEO, unless the sender is clearly someone else the bot allows
+        other = self._author and owner != DEFAULT_OWNER and not same_person(self._author, owner)
+        author = self._author if other else owner
+        store = Impegni(self.vault)
+        action = str(args.get("azione") or "elenca").strip().lower()
+        try:
+            if action == "aggiungi":
+                item = store.add(args.get("chi") or "io", args.get("cosa"), args.get("entro") or "", owner=owner,
+                                 author=author, fonte=f"[[Diario/{date.today().isoformat()}]]")
+                self.vault.commit(f"Impegno #{item['id']}: aggiunto")
+                return {"ok": True, "impegno": _public(item), "testo": report_line(item, owner)}
+            if action == "modifica":
+                if args.get("id") is None:
+                    raise CommitmentError("modifica needs the commitment's number (id)")
+                item = store.modify(args["id"], chi=args.get("chi"), cosa=args.get("cosa"), entro=args.get("entro"),
+                                    stato=args.get("stato"), owner=owner, author=author)
+                self.vault.commit(f"Impegno #{item['id']}: {item['stato']}")
+                return {"ok": True, "impegno": _public(item), "testo": report_line({**item, "nuovo": True}, owner)}
+            if action != "elenca":
+                raise CommitmentError("azione must be elenca, aggiungi or modifica")
+            items = store.listing(chi=args.get("chi"), scaduti=bool(args.get("scaduti")), owner=owner, author=author)
+            return {"ok": True, "count": len(items), "impegni": [_public(i) for i in items],
+                    "testo": "\n".join(report_line({**i, "nuovo": True}, owner) for i in items) or "Nessun impegno aperto."}
+        except CommitmentError as exc:
+            return {"ok": False, "error": str(exc)}
 
     def shutdown(self) -> None:
         self._index = None
@@ -252,6 +302,10 @@ def _is_compaction(text: str) -> bool:
         return bool(is_compaction_summary_message({"role": "user", "content": text}))
     except Exception:  # noqa: BLE001 - outside Hermes, or the helper moved
         return (text or "").lstrip().startswith(("[CONTEXT COMPACTION", "[Context summary"))
+
+
+def _public(item: dict[str, Any]) -> dict[str, Any]:
+    return {k: item.get(k) for k in ("id", "chi", "cosa", "entro", "stato", "fonte")}
 
 
 def _err(message: str, hint: str = "") -> str:

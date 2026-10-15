@@ -137,3 +137,9 @@ def test_tool_reports_and_consolidates(vault, folder, monkeypatch):
     drop(folder, "agg.txt", "Aggiornamento\n- Z20 V05 cellula incollata")
     out = BrainProvider(host=FakeHost(llm=[REPORT, {"entita": []}]), vault=vault).handle_tool_call("brain_inbox", {})
     assert '"new": 1' in out and "Rischi e ritardi" in out and '"consolidation"' in out
+
+
+def test_a_report_list_given_as_one_string_is_one_line(vault, folder):
+    drop(folder, "agg.txt", "Aggiornamento\n- V03 in ritardo")
+    report = Inbox(FakeHost(llm=[{"novita": [], "rischi": "Z20 V03: ritardo di una settimana"}]), vault, folder).sync(today=TODAY)
+    assert "Rischi e ritardi:\n- Z20 V03: ritardo di una settimana\n" in report["report"]

@@ -25,7 +25,7 @@ from typing import Any
 from xml.etree import ElementTree
 
 from . import voice
-from .host import Host
+from .host import Host, as_list
 from .vault import UPDATES_DIR, Vault, _lock, atomic_write, safe_filename
 
 logger = logging.getLogger(__name__)
@@ -248,7 +248,7 @@ class Inbox:
             logger.warning("brain: report for %s failed: %s", note.name, exc)
             parsed = {}
         sections = []
-        lists = {"da_vedere": flagged(text), **{k: [str(x).strip() for x in parsed.get(k) or [] if str(x).strip()]
+        lists = {"da_vedere": flagged(text), **{k: [str(x).strip() for x in as_list(parsed.get(k)) if str(x).strip()]
                                                 for k in ("rischi", "novita")}}
         for key, label in (("da_vedere", "Da vedere"), ("rischi", "Rischi e ritardi"), ("novita", "Novità")):
             if lists[key]:

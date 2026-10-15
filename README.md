@@ -20,15 +20,62 @@ The second brain of [Alfred](https://github.com/Blubobo1010/Alfred-Ai-Audit) / H
   folder, or `alfred brain transcribe FILE`. Alfred transcribes it with
   its own speech-to-text, gives it a title, a type (idea, da fare, incontro, decisione, promemoria,
   aggiornamento) and an area (commerciale, produzione, progettazione, fornitori, amministrazione,
-  personale), and keeps summary, actions and the full transcript. The audio itself is never copied.
-- Recall before every turn (names and aliases first, then keyword search, model-free) and seven
-  tools: `brain_search`, `brain_read`, `brain_note`, `brain_sync`, `brain_inbox`, `brain_transcribe`,
-  `brain_consolidate`.
+  personale), and keeps summary, commitments and the full transcript. The audio itself is never copied.
+- **Impegni.md** — the commitments Alfred tracks: who must do what, by when, each with a number (#12). See
+  [Commitments](#commitments).
+- Recall before every turn (names and aliases first, then keyword search, model-free, plus the open commitments
+  of the people named) and eight tools: `brain_search`, `brain_read`, `brain_note`, `brain_sync`, `brain_inbox`,
+  `brain_transcribe`, `brain_consolidate`, `brain_impegni`.
 - The vault is a git repository: every change Alfred makes is a commit you can inspect or revert.
 
-Consolidation (journal and recordings → entity notes) runs at the end of each session and nightly
-at 03:00 on the model Alfred uses (cloud or local), or on the auxiliary slot `alfred_brain`
-(`auxiliary.alfred_brain` in config.yaml) if you want a different one.
+Linking (recordings, updates and the journal → client, person and project notes) runs in the background a minute
+after something new is filed, at the end of each session and nightly at 03:00. Before each model call it waits
+until the local model managed by Alfred has been idle for 15 seconds, so it never slows the CEO's chat (a cloud
+model is not waited for). It uses the model Alfred uses (cloud or local), or the auxiliary slot `alfred_brain`
+(`auxiliary.alfred_brain` in config.yaml) if you want a different one. A source the model keeps answering badly is
+skipped after three tries and listed in `alfred brain status`, instead of holding back everything after it.
+
+## Commitments
+
+Every voice memo's actions become numbered commitments in the same model call that classifies the memo, and the
+report the CEO reads ends with them:
+
+```text
+Impegni:
+#12 Andrea Lorini — mandare i 3 compiti della digitalizzazione — entro ven 16/10
+#13 Tu — chiamare il fornitore dei pannelli
+Se uno non è giusto dimmelo (es. «il 13 è di Marco, entro lunedì»).
+```
+
+- He corrects or closes them in the chat ("il 12 è fatto", "il 13 è di Marco, entro lunedì"), adds new ones
+  ("Marco mi manda il disegno entro giovedì") and asks for them ("cosa deve fare Andrea?", "cosa è scaduto?"):
+  the tool `brain_impegni`. He never files anything himself.
+- A memo about an open commitment is matched to it (same person, same words) instead of copied; it never closes one
+  and never moves a date it did not set (a different date is only reported).
+- "io" in a memo is its author: the CEO for the chat, the CLI and his own folder, the colleague for the shared
+  folder. Tell Alfred the CEO's name:
+
+```bash
+alfred config set plugins.entries.brain.settings.owner_name "Mario Rossi"
+alfred gateway restart
+```
+
+- `Impegni.md` is rewritten from `.alfred/impegni.json` after every change: change commitments through Alfred, not by
+  hand.
+
+### Quality, on any model
+
+`alfred brain status` shows open and overdue commitments, the correction rate (changed, cancelled, reopened) and
+how many of the model's quotes were found in the transcript. `alfred brain eval FILE.jsonl` runs the configured
+model on labelled memos and reports precision, recall, right owner and right date; run it again after every model
+change. One memo per line, `autore` omitted for the CEO:
+
+```json
+{"trascrizione": "Andrea mi manda entro venerdì i tre compiti per il CRM. Io chiamo Marco Bianchi.", "data": "2026-10-15", "impegni": [{"chi": "Andrea Lorini", "cosa": "mandare i tre compiti per il CRM", "entro": "2026-10-16"}, {"chi": "io", "cosa": "chiamare Marco Bianchi"}]}
+```
+
+`tests/fixtures/eval-sintetico.jsonl` is a small invented set. Real memos are client data: label them on the
+client's machine and never put them in a repository.
 
 ## Install
 
@@ -55,7 +102,7 @@ OneDrive folder name from `ls ~/Library/CloudStorage/`).
 
 `alfred brain` commands exist only while `brain` is the active memory provider (Hermes wires the
 CLI of the active provider only). Other commands: `sync`, `inbox` (import now), `transcribe FILE…`,
-`consolidate`, `reindex`.
+`consolidate`, `reindex`, `eval FILE.jsonl`. A command links what it imported before it exits.
 
 ## Voice memos
 
@@ -97,13 +144,14 @@ Macs with more performance cores are faster.
 
 ## What this plugin does on your machine
 
-- Reads and writes Markdown files under the vault folder only (and `.alfred/` state inside it);
-  reads (never modifies) the updates folder and the CEO's memo folder if configured (`ALFRED_BRAIN_INBOX`,
-  `ALFRED_BRAIN_VOICE`).
+- Reads and writes Markdown files under the vault folder only (and `.alfred/` inside it: state, commitments, a lock
+  file kept out of git); reads (never modifies) the updates folder and the CEO's memo folder if configured
+  (`ALFRED_BRAIN_INBOX`, `ALFRED_BRAIN_VOICE`).
 - Reads the audio files it is given (chat attachments, the two folders, the CLI) and hands them to
   Alfred's speech-to-text: with `stt.provider local` nothing leaves the machine, with a cloud
   provider the audio goes to that provider. Audio is never copied into the vault.
-- Calls the configured model for consolidation, through Hermes' plugin LLM facade.
+- Calls the configured model for consolidation and voice memos, through Hermes' plugin LLM facade; asks the local
+  model server Alfred manages whether it is busy (Hermes' own check) before background work.
 - Calls the MCP server `plaud` only if you add it to `plugins.entries.brain.mcp_allowlist`
   (`alfred brain setup` does it); no other network access.
 - Runs `git` in the vault folder when git is installed.

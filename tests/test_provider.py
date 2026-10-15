@@ -60,14 +60,53 @@ def test_plaud_errors_come_back_with_a_hint(vault):
 
 
 def test_session_end_consolidates_in_background(vault):
-    p = provider(vault, llm={"entita": [{"tipo": "cliente", "nome": "Kimera", "fatti": [{"testo": "Ok sul budget."}]}]})
+    from alfred_brain import consolidate
+    p = provider(vault, llm={"entita": [{"tipo": "cliente", "nome": "Kimera", "fatti": [{"testo": "Ok sul budget."}]}]},
+                 background=True)
     p.sync_turn("Kimera ha approvato il budget?", "Sì.")
     p.on_session_end([])
-    import threading
-    for t in threading.enumerate():
-        if t.name == "brain-consolidate":
-            t.join(5)
+    assert consolidate.wait_idle(5)
     assert (vault.root / "Clienti" / "Kimera.md").exists()
+
+
+def test_tools_link_in_the_background_when_there_is_one(vault):
+    from alfred_brain import consolidate
+    p = provider(vault, mcp={"list_files": fixture("plaud_list_structured.json"), "get_note": fixture("plaud_note.json"),
+                             "get_transcript": fixture("plaud_transcript.json")}, params={"get_note": ["file_id"], "get_transcript": ["file_id"]},
+                 background=True)
+    out = call(p, "brain_sync")
+    assert out["new"] == 2 and out["consolidation"] == {"background": True}
+    assert call(p, "brain_consolidate") == {"ok": True, "background": True}
+    assert consolidate.wait_idle(5) and vault.state()["plaud_pending"] == []
+
+
+def test_commitments_tool(vault):
+    p = provider(vault, owner="Luca Betti")
+    p.on_turn_start(1, "x", author_name="Luca")
+    added = call(p, "brain_impegni", azione="aggiungi", chi="Marco", cosa="mandare il disegno del cofano", entro="2026-10-16")
+    assert added["ok"] and added["impegno"]["id"] == 1 and added["testo"].startswith("#1 Marco — mandare il disegno del cofano")
+    mine = call(p, "brain_impegni", azione="aggiungi", cosa="chiamare Beta")
+    assert mine["impegno"]["chi"] == "Luca Betti" and mine["testo"] == "#2 Tu — chiamare Beta"
+    listed = call(p, "brain_impegni", azione="elenca", chi="io")
+    assert listed["count"] == 1 and listed["testo"] == "#2 Tu — chiamare Beta"
+    fixed = call(p, "brain_impegni", azione="modifica", id=1, chi="Marco Bianchi", entro="2026-10-19")
+    assert fixed["impegno"]["chi"] == "Marco Bianchi" and fixed["impegno"]["entro"] == "2026-10-19"
+    done = call(p, "brain_impegni", azione="modifica", id=2, stato="fatto")
+    assert done["impegno"]["stato"] == "fatto" and call(p, "brain_impegni", azione="elenca")["count"] == 1
+    assert call(p, "brain_impegni", azione="modifica", stato="fatto")["ok"] is False
+    assert "YYYY-MM-DD" in call(p, "brain_impegni", azione="aggiungi", cosa="x", entro="domani")["error"]
+    assert call(p, "brain_impegni", azione="boh")["ok"] is False
+    assert (vault.root / "Impegni.md").exists() and "brain_impegni" in p.system_prompt_block()
+
+
+def test_prefetch_brings_the_open_commitments_of_who_is_named(vault):
+    vault.add_facts("persona", "Marco Bianchi", [("Responsabile acquisti di Beta.", "2026-10-12", "")], alias=["Marco"])
+    p = provider(vault)
+    call(p, "brain_impegni", azione="aggiungi", chi="Marco", cosa="mandare il disegno del cofano")
+    block = p.prefetch("Marco ha mandato qualcosa?")
+    assert "Responsabile acquisti di Beta." in block and "#1 Marco Bianchi — mandare il disegno del cofano" in block
+    assert p.recall_status().count == 2
+    assert "Impegni aperti" not in p.prefetch("Che tempo fa a Modena?")
 
 
 def test_transcribe_tool_reports_and_journals_only_the_link(vault, tmp_path):
@@ -104,3 +143,12 @@ def test_unavailable_without_vault(tmp_path):
     from alfred_brain.vault import Vault
     p = BrainProvider(host=FakeHost(), vault=Vault(tmp_path / "none"))
     assert p.is_available() is False and "alfred brain init" in p.unavailable_reason()
+
+
+def test_commitment_changes_from_the_chat_are_in_the_vault_history(vault):
+    import subprocess
+    p = provider(vault)
+    call(p, "brain_impegni", azione="aggiungi", chi="Marco", cosa="mandare il disegno")
+    call(p, "brain_impegni", azione="modifica", id=1, stato="fatto")
+    log = subprocess.run(["git", "log", "--format=%s"], cwd=vault.root, capture_output=True, text=True).stdout
+    assert "Impegno #1: aggiunto" in log and "Impegno #1: fatto" in log

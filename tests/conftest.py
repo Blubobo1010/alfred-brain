@@ -34,27 +34,52 @@ from alfred_brain.vault import Vault  # noqa: E402
 class FakeHost(Host):
     """``llm_json`` answers from a queue (or a callable); ``mcp`` answers from a {tool: response} table;
     ``transcribe`` from a {file name: text or exception} table (or a callable), held by ``gate`` while it is closed;
-    ``wake_inbox`` counts in ``wakes``."""
+    ``wake_inbox`` counts in ``wakes``; ``owner`` is the CEO's configured name; ``busy`` answers ``model_busy`` (a
+    callable, a list consumed one per check, or a fixed value). No background passes unless ``background=True``:
+    a test reads the model's answers in order."""
 
     def __init__(self, llm: Any = None, mcp: dict[str, Any] | None = None, params: dict[str, list[str]] | None = None,
-                 transcripts: Any = None, gate: threading.Event | None = None):
+                 transcripts: Any = None, gate: threading.Event | None = None, owner: str = "il CEO",
+                 busy: Any = None, background: bool = False):
         self.llm = llm
         self.mcp_table = mcp or {}
         self.params = params or {}
         self.transcripts = transcripts
         self.gate = gate
+        self.owner_name = owner
+        self.busy = busy
+        self.background = background
         self.llm_calls: list[str] = []
+        self.instructions: list[str] = []
         self.mcp_calls: list[tuple[str, str, dict]] = []
         self.transcribe_calls: list[str] = []
+        self.busy_checks = 0
         self.wakes = 0
 
     def llm_json(self, instructions, text, schema):
         self.llm_calls.append(text)
+        self.instructions.append(instructions)
+        self.answered_by = "fake/modello"
         if callable(self.llm):
-            return self.llm(text)
-        if isinstance(self.llm, list):
-            return self.llm.pop(0) if self.llm else {"entita": []}
-        return self.llm if self.llm is not None else {"entita": []}
+            answer = self.llm(text)
+        elif isinstance(self.llm, list):
+            answer = self.llm.pop(0) if self.llm else {"entita": []}
+        else:
+            answer = self.llm if self.llm is not None else {"entita": []}
+        if isinstance(answer, Exception):  # a queued failure: timeouts, schema errors
+            raise answer
+        return answer
+
+    def owner(self):
+        return self.owner_name
+
+    def model_busy(self):
+        self.busy_checks += 1
+        if callable(self.busy):
+            return self.busy()
+        if isinstance(self.busy, list):
+            return self.busy.pop(0) if self.busy else False
+        return self.busy
 
     def mcp(self, server, tool, args, timeout=60):
         self.mcp_calls.append((server, tool, dict(args)))
@@ -90,6 +115,14 @@ def no_folders_from_the_environment(monkeypatch):
     """Tests pass their folders explicitly: a real ALFRED_BRAIN_* on the developer's machine must not leak in."""
     for name in ("ALFRED_BRAIN_INBOX", "ALFRED_BRAIN_VOICE"):
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def no_background_left():
+    """A background pass started by a test ends with it, and never waits for real on a local model."""
+    from alfred_brain import consolidate
+    yield
+    assert consolidate.wait_idle(10), "a background linking pass is still running"
 
 
 @pytest.fixture

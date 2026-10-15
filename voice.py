@@ -12,6 +12,11 @@ and otherwise gets ``in_progress`` (asking again with the same file joins the jo
 finished memo is queued in ``voice_report`` until someone reports it: the caller that got the result, the next
 call with the same file, or the updates report, which a memo nobody is waiting for moves to the next cron tick
 (``Host.wake_inbox``) so it reaches the CEO in about a minute, not at the next half hour.
+
+The actions said in a memo become commitments (``impegni``) in the same model call that classifies it: the prompt
+gets the memo's date with a two-week calendar, its author ("io") and the open commitments it may be about. The note's
+"Da fare" and the report show exactly the commitments stored, with their numbers, so what the CEO reads is what
+Alfred follows; he corrects them in the chat. Filing a memo kicks the background linking (``consolidate.kick``).
 """
 
 from __future__ import annotations
@@ -26,8 +31,9 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from . import consolidate, impegni
 from .consolidate import KNOWN_HINT, TRANSCRIPT_HEADING
-from .host import Host, spawn_thread
+from .host import DEFAULT_OWNER, Host, as_list, spawn_thread
 from .vault import VOICE_DIR, Vault, _lock, atomic_write, meta_value, safe_filename
 
 logger = logging.getLogger(__name__)
@@ -49,6 +55,9 @@ LATER_HINT = ("Long recording, still being transcribed in the background: tell t
               "When it is done the summary is sent with the updates report, if that is scheduled; if they ask before, "
               "call brain_transcribe again with the same path.")
 
+# Strict on purpose: on a local server it is the decoding grammar (without "required" a small model skipped the title
+# and the summary, without "enum" it put an area in the category). An answer outside it is asked again without
+# constraints (``HermesHost.llm_json``); ``choice`` and ``impegni.actions`` normalise that one, bare strings included.
 SCHEMA = {
     "type": "object",
     "properties": {
@@ -57,7 +66,12 @@ SCHEMA = {
         "area": {"type": "string", "enum": list(AREE)},
         "argomenti": {"type": "array", "items": {"type": "string"}},
         "riassunto": {"type": "array", "items": {"type": "string"}},
-        "azioni": {"type": "array", "items": {"type": "string"}},
+        "azioni": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"chi": {"type": "string"}, "cosa": {"type": "string"}, "entro": {"type": "string"},
+                           "stesso_di": {"type": "integer"}, "evidenza": {"type": "string"}},
+            "required": ["chi", "cosa", "entro", "stesso_di", "evidenza"],
+        }},
     },
     "required": ["titolo", "categoria", "area", "argomenti", "riassunto", "azioni"],
 }
@@ -73,11 +87,64 @@ vocale registrata al telefono, da lui o da un collaboratore. Classificala e rias
   amministrazione (finanza, budget, contratti), personale (dipendenti, assunzioni, formazione), altro.
 - argomenti: clienti, aziende, fornitori, progetti e persone nominati, con il nome più completo (al massimo 5).
 - riassunto: al massimo 5 frasi brevi con i fatti, le cifre e le date dette.
-- azioni: le cose da fare dette, con chi e quando se detto (al massimo 5). Lista vuota se non ce ne sono.
+- azioni: le cose concrete da fare dette nella nota (al massimo 8; non le idee o i desideri; lista vuota se
+  non ce ne sono). Per ognuna un oggetto con:
+  - chi: chi la deve fare, con il nome come detto; "io" se è l'autore della nota.
+  - cosa: l'azione in breve, con il verbo all'infinito (es. "mandare a Marco i disegni del cofano").
+  - entro: la scadenza come data AAAA-MM-GG se è detta; per "venerdì", "lunedì prossimo", "fine mese" usa il
+    calendario dato sotto; "" se non è detta.
+  - stesso_di: il numero di un impegno già aperto (elenco dato sotto) se la nota parla proprio di quello,
+    altrimenti 0.
+  - evidenza: le parole della trascrizione da cui la ricavi, copiate così come sono (al massimo 25 parole).
 
 Scrivi in italiano. Copia nomi, sigle, cifre e date come sono nella trascrizione e non inventare nulla: la
 trascrizione automatica può contenere errori, non correggerli a fantasia.
 """
+
+
+def author_label(author: str, owner: str) -> str:
+    """How the prompt names the memo's author: "io" in the transcript is this person."""
+    if author == owner:
+        return "il CEO" if owner == DEFAULT_OWNER else f"{owner} (il CEO)"
+    return f"{author} (collaboratore)"
+
+
+def classify(host: Host, vault: Vault, transcript: str, *, when: date, author: str, owner: str,
+             open_block: str = "") -> dict[str, Any]:
+    """Title, type, area, topics, summary and actions (raw, see ``impegni.actions``); if the model fails the memo is
+    still filed with what can be derived without it. Shared with ``alfred brain eval``."""
+    known = sorted({n.title for n in vault.entities()})[:200]
+    parts = [f"Autore della nota: {author_label(author, owner)}.",
+             f"Registrata {impegni.GIORNI[when.weekday()]} {when.isoformat()}.",
+             "Calendario: " + impegni.calendar(when)]
+    if open_block:
+        parts.append("Impegni già aperti (numero, chi, cosa):\n" + open_block)
+    if known:
+        parts.append(KNOWN_HINT + "; ".join(known))
+    parts.append("Trascrizione:\n" + transcript[:MAX_CHARS])
+    try:
+        parsed = host.llm_json(INSTRUCTIONS, "\n\n".join(parts), SCHEMA) or {}
+        if not parsed:
+            logger.warning("brain: classifying a voice memo failed: the model gave no usable JSON")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("brain: classifying a voice memo failed: %s", exc)
+        parsed = {}
+
+    def choice(value: Any, allowed: tuple[str, ...]) -> str:
+        value = str(value or "").strip().lower()
+        return value if value in allowed else "altro"
+
+    def items(value: Any, limit: int = 5) -> list[str]:
+        values = [v for v in as_list(value) if isinstance(v, (str, int, float))]
+        return [" ".join(str(v).split()) for v in values if str(v).strip()][:limit]
+
+    title = " ".join(str(parsed.get("titolo") or "").replace("#", " ").split())[:80]
+    if not title:
+        words = transcript.split()
+        title = " ".join(words[:8]).rstrip(".,;:!?") + ("…" if len(words) > 8 else "")
+    return {"titolo": title, "categoria": choice(parsed.get("categoria"), TIPI), "area": choice(parsed.get("area"), AREE),
+            "argomenti": items(parsed.get("argomenti")), "riassunto": items(parsed.get("riassunto")),
+            "azioni": impegni.actions(parsed.get("azioni"))}
 
 
 @dataclass
@@ -263,6 +330,8 @@ class VoiceMemos:
         job.done.set()
         if job.fonte in FOLDERS or job.orphaned:  # nobody is waiting: the updates report carries it now
             self.host.wake_inbox()
+        if result.get("status") == "done":  # facts into client, person and project notes, off this thread
+            consolidate.kick(self.host, self.vault)
 
     def _failed(self, job: Job, error: str) -> None:
         """Chat and CLI: the failure is reported (the user may have stopped waiting). Folders: retried on the next
@@ -292,18 +361,53 @@ class VoiceMemos:
             report = f"Nota vocale {job.path.name}: nessun parlato riconosciuto, non archiviata."
             self._file(job, "", report)
             return {"ok": True, "status": "no_speech", "file": job.path.name, "report": report}
-        info = self._classify(transcript)  # the model call stays outside the vault lock
+        when = self._when(job)
+        owner = self.host.owner()
+        author = self._author(job, owner)
+        store = impegni.Impegni(self.vault)
+        try:
+            open_block, offered = store.prompt_block(transcript, owner=owner, author=author)
+        except Exception as exc:  # noqa: BLE001 - a damaged commitments file: the memo is filed all the same
+            logger.warning("brain: open commitments unavailable: %s", exc)
+            open_block, offered = "", set()
+        info = classify(self.host, self.vault, transcript, when=when, author=author, owner=owner,
+                        open_block=open_block)  # the model call stays outside the vault lock
         with _lock:
             filed = self._filed(job.digest)
             if filed:  # filed meanwhile by another process (CLI vs gateway)
                 return filed
-            note = self._write(job, transcript, info)
+            note = self._note_path(job, info, when)
             rel = self.vault.rel(note)
-            report = self._report_text(job, rel, info, transcript)
+            try:
+                commitments = store.file_memo(info["azioni"], author=author, owner=owner, fonte=f"[[{rel[:-3]}]]",
+                                              when=when, transcript=transcript, offered=offered)
+            except Exception as exc:  # noqa: BLE001 - the memo is filed anyway, its actions stay as text
+                logger.warning("brain: commitments of %s not stored: %s", job.path.name, exc)
+                commitments = None
+            self._write(job, note, transcript, info, when, commitments)
+            report = self._report_text(job, rel, info, transcript, commitments, owner)
             self._file(job, rel, report)
         self.vault.commit(f"Nota vocale: {note.stem}")
         return {"ok": True, "status": "done", "note": rel, "categoria": info["categoria"], "area": info["area"],
-                "report": report}
+                "impegni": [c["id"] for c in commitments or []], "report": report}
+
+    def _when(self, job: Job) -> date:
+        """The day the memo was recorded (the file's date), never in the future."""
+        today = date.today()
+        try:
+            return min(date.fromtimestamp(job.path.stat().st_mtime), today)
+        except OSError:
+            return today
+
+    @staticmethod
+    def _author(job: Job, owner: str) -> str:
+        """Who "io" is: the colleague in the shared folder; otherwise the CEO, unless the chat sender is clearly
+        someone else (another user the bot allows)."""
+        if job.fonte == FOLDER:
+            return job.autore or "un collaboratore"
+        if job.autore and owner != DEFAULT_OWNER and not impegni.same_person(job.autore, owner):
+            return job.autore
+        return owner
 
     def _filed(self, digest: str) -> dict[str, Any] | None:
         rel = self.vault.state().get("voice_seen", {}).get(digest)
@@ -334,43 +438,15 @@ class VoiceMemos:
 
     # ---- the note -------------------------------------------------------------------------
 
-    def _classify(self, transcript: str) -> dict[str, Any]:
-        """Title, type, area, topics, summary and actions; if the model fails the memo is still filed."""
-        known = sorted({n.title for n in self.vault.entities()})[:200]
-        prompt = (KNOWN_HINT + "; ".join(known) + "\n\n" if known else "") + transcript[:MAX_CHARS]
-        try:
-            parsed = self.host.llm_json(INSTRUCTIONS, prompt, SCHEMA) or {}
-            if not parsed:
-                logger.warning("brain: classifying a voice memo failed: the model gave no usable JSON")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("brain: classifying a voice memo failed: %s", exc)
-            parsed = {}
-
-        def choice(value: Any, allowed: tuple[str, ...]) -> str:
-            value = str(value or "").strip().lower()
-            return value if value in allowed else "altro"
-
-        def items(value: Any, limit: int = 5) -> list[str]:
-            values = value if isinstance(value, list) else []
-            return [" ".join(str(v).split()) for v in values if str(v).strip()][:limit]
-
-        title = " ".join(str(parsed.get("titolo") or "").replace("#", " ").split())[:80]
-        if not title:
-            words = transcript.split()
-            title = " ".join(words[:8]).rstrip(".,;:!?") + ("…" if len(words) > 8 else "")
-        return {"titolo": title, "categoria": choice(parsed.get("categoria"), TIPI), "area": choice(parsed.get("area"), AREE),
-                "argomenti": items(parsed.get("argomenti")), "riassunto": items(parsed.get("riassunto")),
-                "azioni": items(parsed.get("azioni"))}
-
-    def _write(self, job: Job, transcript: str, info: dict[str, Any]) -> Path:
-        today = date.today()
-        try:
-            when = min(date.fromtimestamp(job.path.stat().st_mtime), today)
-        except OSError:
-            when = today
+    def _note_path(self, job: Job, info: dict[str, Any], when: date) -> Path:
         note = self.vault.root / VOICE_DIR / f"{when.isoformat()} {safe_filename(info['titolo'])}.md"
         if note.exists():
             note = note.with_name(f"{note.stem} ({job.digest[:6]}).md")
+        return note
+
+    def _write(self, job: Job, note: Path, transcript: str, info: dict[str, Any], when: date,
+               commitments: list[dict[str, Any]] | None) -> None:
+        today = date.today()
         topics = [t for t in (meta_value(a) for a in info["argomenti"]) if t]
         tags = ["nota-vocale", *(v.replace(" ", "-") for v in (info["categoria"], info["area"]))]
         meta = ["---", "tipo: nota vocale", f"fonte: {meta_value(job.fonte)}", f"file: {meta_value(job.path.name, 120)}",
@@ -382,19 +458,27 @@ class VoiceMemos:
                            *([f"Argomenti: {', '.join(info['argomenti'])}"] if info["argomenti"] else []),
                            *([f"Autore: {job.autore}"] if job.autore else [])])
         summary = "\n".join(f"- {x}" for x in info["riassunto"]) or "_Riassunto non disponibile._"
-        actions = "\n".join(f"- {x}" for x in info["azioni"]) or "_Niente da fare._"
+        if commitments is None:  # not stored (damaged commitments file): the actions as the model said them
+            todo = [impegni.plain_action(a) for a in info["azioni"]]
+        else:
+            todo = [impegni.note_line(c) + ("" if c.get("nuovo", True) else " (già aperto)") for c in commitments]
+        actions = "\n".join(f"- {x}" for x in todo) or "_Niente da fare._"
         body = (f"# {info['titolo']}\n\n{line}\n\n## Riassunto\n\n{summary}\n\n## Da fare\n\n{actions}\n\n"
                 f"{TRANSCRIPT_HEADING}\n\n{paragraphs(transcript)}\n")
         atomic_write(note, "\n".join(meta) + body)
-        return note
 
-    def _report_text(self, job: Job, rel: str, info: dict[str, Any], transcript: str) -> str:
+    def _report_text(self, job: Job, rel: str, info: dict[str, Any], transcript: str,
+                     commitments: list[dict[str, Any]] | None, owner: str) -> str:
         """What the CEO reads: the chat reply material, or a block of the updates report."""
         who = f" di {job.autore}" if job.autore and job.fonte == FOLDER else ""  # chat, own folder: the CEO's memo
         parts = [f"Nota vocale{who} «{info['titolo']}» ({info['categoria']} · {info['area']})"]
         parts.append("\n".join(f"- {x}" for x in info["riassunto"]) or "(riassunto non disponibile)")
-        if info["azioni"]:
-            parts.append("Da fare:\n" + "\n".join(f"- {x}" for x in info["azioni"]))
+        if commitments:
+            example = next((c["id"] for c in commitments if c.get("nuovo", True)), commitments[0]["id"])
+            parts.append("Impegni:\n" + "\n".join(impegni.report_line(c, owner) for c in commitments)
+                         + f"\nSe uno non è giusto dimmelo (es. «il {example} è di Marco, entro lunedì»).")
+        elif commitments is None and info["azioni"]:
+            parts.append("Da fare:\n" + "\n".join(f"- {impegni.plain_action(a)}" for a in info["azioni"]))
         flags = spoken_flags(transcript) if job.fonte == FOLDER else []
         if flags:
             parts.append("Da vedere:\n" + "\n".join(f"- {x}" for x in flags))

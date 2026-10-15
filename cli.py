@@ -1,8 +1,11 @@
-"""``alfred brain …``: init, setup, inbox, transcribe, status, sync, consolidate, reindex.
+"""``alfred brain …``: init, setup, inbox, transcribe, status, sync, consolidate, reindex, eval.
 
 Hermes only wires this file for the ACTIVE memory provider, so the order on a new machine is:
 ``alfred plugins install Blubobo1010/alfred-brain --enable`` (sets ``memory.provider: brain``),
 then ``alfred brain init`` and ``alfred brain setup``.
+
+A CLI command is its own short-lived process: it never leaves linking to a background thread (``host.background``
+off) and runs the pass itself before exiting.
 """
 
 from __future__ import annotations
@@ -10,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import date
 from pathlib import Path
 
 from .host import INBOX_JOB
@@ -37,17 +41,22 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     inbox.add_argument("--deliver", default="telegram", help="Where the report goes (cron deliver target, default telegram)")
     transcribe = sub.add_parser("transcribe", help="Transcribe audio files (e.g. iPhone voice memos) into Note vocali/ now")
     transcribe.add_argument("files", nargs="+", help="Audio files (.m4a, .mp3, .wav, …)")
-    sub.add_parser("status", help="Vault counts, last Plaud sync and consolidation, speech-to-text settings")
+    sub.add_parser("status", help="Vault counts, commitments and their correction rate, last Plaud sync and "
+                   "consolidation, speech-to-text settings")
     sub.add_parser("sync", help="Import new Plaud recordings now")
     sub.add_parser("consolidate", help="File pending journal and recordings into entity notes now")
     sub.add_parser("reindex", help="Rebuild the search index (normally automatic)")
+    evaluate = sub.add_parser("eval", help="Measure how well the configured model finds commitments in labelled voice "
+                              "memos (JSONL: trascrizione, data, autore, impegni) — rerun it after every model change")
+    evaluate.add_argument("file", help="JSONL file, one labelled memo per line")
+    evaluate.add_argument("--dettagli", action="store_true", help="Also list the missed and the extra commitments")
 
 
 def brain_command(args: argparse.Namespace) -> int:
     command = getattr(args, "brain_command", None) or "status"
     try:
         return {"init": _init, "setup": _setup, "inbox": _inbox, "transcribe": _transcribe, "status": _status,
-                "sync": _sync, "consolidate": _consolidate, "reindex": _reindex}[command](args)
+                "sync": _sync, "consolidate": _consolidate, "reindex": _reindex, "eval": _eval}[command](args)
     except KeyboardInterrupt:
         return 130
     except Exception as exc:  # noqa: BLE001 - a CLI error is a message, not a traceback
@@ -92,15 +101,14 @@ def _inbox(args: argparse.Namespace) -> int:
              ((ENV, getattr(args, "path", "")), (VOICE_ENV, getattr(args, "voice_path", ""))) if value]
     if not given:
         from . import voice
-        from .provider import BrainProvider
-        provider = BrainProvider()
-        provider.host.wake = False  # this command prints the reports itself
+        provider = _provider()
         print(provider.handle_tool_call("brain_inbox", {}))
         if voice.busy():  # audio from the folders: this process would exit and drop the transcription
             print("Transcribing audio from the folders…", file=sys.stderr)
             voice.wait_idle()
             for text in voice.VoiceMemos(provider.host, provider.vault).pop_reports():
                 print(f"\n{text}")
+            _link(provider)
         return 0
     for _name, folder in given:
         if not folder.is_dir():
@@ -122,9 +130,8 @@ def _inbox(args: argparse.Namespace) -> int:
 
 
 def _transcribe(args: argparse.Namespace) -> int:
-    from .provider import BrainProvider
     from .voice import VoiceMemos
-    provider = BrainProvider()
+    provider = _provider()
     memos = VoiceMemos(provider.host, provider.vault)
     failed = 0
     for name in args.files:
@@ -134,7 +141,25 @@ def _transcribe(args: argparse.Namespace) -> int:
             result = {"ok": False, "error": str(exc)}
         failed += not result.get("ok")
         print(json.dumps(result, ensure_ascii=False, indent=2))
+    _link(provider)
     return 1 if failed else 0
+
+
+def _provider():
+    """A provider for a short-lived command: it prints the reports itself, links before exiting and uses the model
+    the gateway uses (the ``alfred_brain`` slot)."""
+    from .provider import BrainProvider
+    provider = BrainProvider()
+    provider.host.wake = False
+    provider.host.background = False
+    provider.host.register_aux_task()
+    return provider
+
+
+def _link(provider) -> None:
+    from . import consolidate
+    report = consolidate.run(provider.host, provider.vault, wait=600)
+    print(f"collegamento: {json.dumps(report, ensure_ascii=False)}", file=sys.stderr)
 
 
 def _status(args: argparse.Namespace) -> int:
@@ -146,13 +171,19 @@ def _status(args: argparse.Namespace) -> int:
     counts = {folder: len(list((vault.root / folder).glob("*.md")))
               for folder in ("Diario", "Plaud", "Aggiornamenti", "Note vocali", "Clienti", "Persone", "Progetti")}
     from . import journal
+    from .host import HermesHost
+    from .impegni import CommitmentError, Impegni
     from .inbox import inbox_path, voice_path
 
     def folder(path: Path | None) -> str:
         return "" if path is None else f"{path}{'' if path.is_dir() else ' (NOT FOUND)'}"
 
+    try:
+        commitments = Impegni(vault).stats()
+    except CommitmentError as exc:
+        commitments = {"errore": str(exc)}
     print(json.dumps({
-        "vault": str(vault.root), "notes": counts,
+        "vault": str(vault.root), "notes": counts, "owner_name": HermesHost().owner(), "impegni": commitments,
         "plaud_configured": "plaud" in _mcp_servers(),
         "plaud_allowed": "plaud" in (_plugin_entry().get("mcp_allowlist") or []),
         "plaud_last_sync": state.get("plaud_last_sync"), "plaud_pending": len(state.get("plaud_pending", [])),
@@ -164,6 +195,8 @@ def _status(args: argparse.Namespace) -> int:
                          for v in state.get("voice_failed", {}).values()],
         "journal_pending_chunks": len(journal.pending_chunks(vault)),
         "last_consolidation": state.get("last_consolidation"),
+        "consolidation_retrying": len(state.get("consolidation_attempts", {})),
+        "consolidation_skipped": state.get("consolidation_skipped", [])[-5:],
         "stt": _stt_status(),
     }, ensure_ascii=False, indent=2))
     return 0
@@ -184,15 +217,67 @@ def _stt_status() -> dict:
 
 
 def _sync(args: argparse.Namespace) -> int:
-    from .provider import BrainProvider
-    print(BrainProvider().handle_tool_call("brain_sync", {}))
+    print(_provider().handle_tool_call("brain_sync", {}))
     return 0
 
 
 def _consolidate(args: argparse.Namespace) -> int:
-    from .provider import BrainProvider
-    print(BrainProvider().handle_tool_call("brain_consolidate", {}))
+    print(_provider().handle_tool_call("brain_consolidate", {}))
     return 0
+
+
+def _eval(args: argparse.Namespace) -> int:
+    """Run the voice-memo classification of the configured model on labelled memos and score its commitments. The
+    labelled file never goes in a repository: real memos are client data."""
+    import tempfile
+
+    from .host import HermesHost
+    host = HermesHost()
+    host.register_aux_task()  # measure the model the gateway uses, not the main one by accident
+    vault = Vault() if Vault().exists() else Vault(Path(tempfile.mkdtemp(prefix="brain-eval-")))
+    lines = Path(args.file).expanduser().read_text(encoding="utf-8").splitlines()
+    result = evaluate(host, vault, lines, progress=lambda message: print(message, file=sys.stderr))
+    if not args.dettagli:
+        result.pop("dettagli")
+    print(json.dumps({"owner_name": host.owner(), **result}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def evaluate(host, vault: Vault, lines: list[str], progress=None) -> dict:
+    """Score the commitments ``voice.classify`` finds in labelled memos, one JSON object per line: ``trascrizione``,
+    ``data`` (the recording day), ``autore`` (omitted or "ceo" for the CEO, else the colleague's name) and ``impegni``
+    (``chi`` — "io" for the author —, ``cosa``, ``entro``). Names are compared after the same canonicalisation the
+    store applies."""
+    from . import impegni
+    from .voice import classify
+    owner = host.owner()
+    cases, models = [], set()
+    for number, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        transcript = str(record["trascrizione"])
+        when = date.fromisoformat(str(record.get("data") or date.today().isoformat())[:10])
+        writer = str(record.get("autore") or "")
+        author = owner if not writer or writer.lower() == "ceo" or impegni.same_person(writer, owner) else writer
+        info = classify(host, vault, transcript, when=when, author=author, owner=owner)
+        models.add(getattr(host, "answered_by", ""))
+
+        def canonical(items: list, author: str = author) -> list[dict]:
+            out = []
+            for item in impegni.actions(items, limit=50):
+                who = impegni.person(vault, item.get("chi"), owner=owner, author=author)
+                quote = impegni.clean(item.get("evidenza"), 300)
+                if who:  # the same repairs the store applies, so the score is about what would be filed
+                    out.append({"chi": who, "cosa": impegni.action_text(impegni.clean(item.get("cosa")), quote),
+                                "entro": impegni.parse_due(item.get("entro")), "evidenza": quote})
+            return out
+
+        cases.append({"trascrizione": transcript, "attesi": canonical(record.get("impegni") or []),
+                      "previsti": canonical(info["azioni"])})
+        if progress:
+            progress(f"memo {number}: {len(cases[-1]['previsti'])} trovati, {len(cases[-1]['attesi'])} attesi")
+    return {"risposto_da": sorted(models - {""}), **impegni.score(cases)}
 
 
 def _reindex(args: argparse.Namespace) -> int:

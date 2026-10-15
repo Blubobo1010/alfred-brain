@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .host import AUX_TASK
+from .host import AUX_TASK, AUX_TASK_INFO
 from .provider import BrainProvider
 
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 
 
 def register(ctx) -> None:
@@ -15,7 +15,4 @@ def register(ctx) -> None:
     skill = Path(__file__).parent / "skills" / "brain" / "SKILL.md"
     if skill.exists():
         ctx.register_skill("brain", skill)
-    ctx.register_auxiliary_task(
-        AUX_TASK, display_name="Secondo cervello (consolidamento)",
-        description="Model that files conversations, recordings and voice memos into client, person and project notes.",
-        inherit_from="compression")
+    ctx.register_auxiliary_task(AUX_TASK, **AUX_TASK_INFO)

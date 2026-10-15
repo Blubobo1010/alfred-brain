@@ -118,9 +118,12 @@ class Index:
         return ("…" if start else "") + flat[start:start + max_chars].strip()
 
 
+NOT_RECALLED = {"Impegni.md"}  # a view of the commitments: the provider adds the relevant ones itself
+
+
 def recall_block(index: Index, query: str, *, limit: int = 3, max_chars: int = 1500) -> tuple[str, int]:
     """The ``## Dal secondo cervello`` block injected before a turn, and how many notes it cites."""
-    hits = [(s, d) for s, d in index.search(query, limit=limit + 2) if s >= 1.0][:limit]
+    hits = [(s, d) for s, d in index.search(query, limit=limit + 3) if s >= 1.0 and d.rel not in NOT_RECALLED][:limit]
     if not hits:
         return "", 0
     parts, used = ["## Dal secondo cervello (vault Obsidian)"], 0

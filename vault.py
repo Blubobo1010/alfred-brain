@@ -41,6 +41,8 @@ Questo vault lo tiene aggiornato Alfred.
 - **Note vocali/**: una nota per ogni registrazione audio (memo dell'iPhone, audio dei collaboratori), con
   categoria, riassunto, cose da fare e trascrizione completa. L'audio non viene conservato.
 - **Clienti/**, **Persone/**, **Progetti/**: cosa Alfred ha imparato, con la fonte di ogni informazione.
+- **Impegni.md**: chi deve fare cosa ed entro quando, con un numero per ciascuno (#12). Nascono dalle note vocali e
+  dalla chat; si chiudono o si correggono dicendolo ad Alfred. La nota viene riscritta a ogni modifica.
 
 Nelle note di Clienti, Persone e Progetti, Alfred scrive solo nel riquadro tra
 `<!-- alfred:inizio -->` e `<!-- alfred:fine -->`: tutto il resto è vostro e non viene mai toccato.
@@ -139,7 +141,7 @@ class Vault:
                 atomic_write(self.root / "LEGGIMI.md", README)
             gitignore = self.root / ".gitignore"
             if not gitignore.exists():
-                atomic_write(gitignore, ".obsidian/workspace*\n.trash/\n.DS_Store\n")
+                atomic_write(gitignore, f".obsidian/workspace*\n.trash/\n.DS_Store\n{STATE_DIR}/*.lock\n")
             if shutil.which("git") and not (self.root / ".git").exists():
                 subprocess.run(["git", "init", "-q", "-b", "main"], cwd=self.root, check=False)
             self.write_index()
@@ -148,6 +150,17 @@ class Vault:
 
     def rel(self, path: Path) -> str:
         return path.relative_to(self.root).as_posix()
+
+    def ignore_in_git(self, pattern: str) -> None:
+        """Make sure ``.gitignore`` lists ``pattern`` (vaults created before it was needed). Bytes, appended: whatever a
+        human wrote in the file, in whatever encoding, stays as it is."""
+        path = self.root / ".gitignore"
+        line = pattern.encode("utf-8")
+        with _lock:
+            raw = path.read_bytes() if path.exists() else b""
+            if line not in [ln.strip() for ln in raw.splitlines()]:
+                with path.open("ab") as fh:
+                    fh.write((b"\n" if raw and not raw.endswith(b"\n") else b"") + line + b"\n")
 
     def resolve(self, rel_path: str) -> Path:
         """A vault-relative path, refusing anything that escapes the vault or touches its internals."""
@@ -233,6 +246,8 @@ class Vault:
 
     def write_index(self) -> None:
         sections = ["# Indice", "", "Mappa delle note che Alfred tiene aggiornate.", ""]
+        if (self.root / "Impegni.md").exists():
+            sections += ["Impegni aperti e chiusi: [[Impegni]].", ""]
         for folder in ENTITY_DIRS.values():
             names = sorted((p.stem for p in (self.root / folder).glob("*.md")), key=str.lower)
             sections += [f"## {folder}", *([f"- [[{folder}/{n}|{n}]]" for n in names] or ["- (nessuna)"]), ""]
